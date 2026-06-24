@@ -43,6 +43,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/apps/{id}", get(get_app).delete(delete_app))
         .route("/api/apps/{id}/deploy", post(deploy_app))
         .route("/api/apps/{id}/builds", get(list_builds))
+        .route("/api/builds/{id}/rollback", post(rollback_build))
         .route("/api/apps/{id}/instances", get(list_instances))
         .route("/api/instances/{id}/restart", post(restart_instance))
         .route("/api/instances/{id}/stop", post(stop_instance))
@@ -169,6 +170,18 @@ async fn list_builds(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<Build>>> {
     Ok(Json(Build::list(&state.db, id).await?))
+}
+
+async fn rollback_build(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<DeployResult>> {
+    let result = state
+        .deployer()
+        .rollback(id)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(result))
 }
 
 async fn list_instances(

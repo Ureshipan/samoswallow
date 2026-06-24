@@ -19,6 +19,7 @@ pub fn router(state: AppState) -> Router {
         .route("/apps/{id}/delete", post(delete_app))
         .route("/instances/{id}/restart", post(restart_instance))
         .route("/instances/{id}/stop", post(stop_instance))
+        .route("/builds/{id}/rollback", post(rollback_build))
         .with_state(state)
 }
 
@@ -259,7 +260,7 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                     div class="muted" { "Сборок ещё нет." }
                 } @else {
                     table {
-                        thead { tr { th { "ID" } th { "Commit" } th { "Статус" } th { "Образ" } th { "Когда" } } }
+                        thead { tr { th { "ID" } th { "Commit" } th { "Статус" } th { "Образ" } th { "Когда" } th { "" } } }
                         tbody {
                             @for b in &builds {
                                 tr {
@@ -268,6 +269,13 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                                     td { (status_tag(&b.status)) }
                                     td class="mono" { (b.image_tag.clone().unwrap_or_default()) }
                                     td class="muted" { (b.created_at) }
+                                    td {
+                                        @if b.status == "success" {
+                                            form class="inline" method="post" action={ "/builds/" (b.id) "/rollback" } {
+                                                button type="submit" { "Откатить сюда" }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -305,6 +313,17 @@ async fn delete_app(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
     let _ = state.caddy.remove_app_route(id).await;
     App::delete(&state.db, id).await?;
     Ok(Redirect::to("/"))
+}
+
+async fn rollback_build(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+    let app_id = match Build::get(&state.db, id).await {
+        Ok(b) => b.app_id,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    match state.deployer().rollback(id).await {
+        Ok(_) => Redirect::to(&format!("/apps/{app_id}")).into_response(),
+        Err(e) => ApiError::Internal(e).into_response(),
+    }
 }
 
 async fn restart_instance(

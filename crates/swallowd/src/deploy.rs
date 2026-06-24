@@ -70,41 +70,10 @@ impl Deployer {
         };
         info!(app = %app.name, %image_tag, "image built ({} bytes of log)", build_log.len());
 
-        // 4. Run a new instance on a free host port.
-        let host_port = pick_free_port().context("allocating host port")?;
-        let container_name = format!(
-            "sw-{}-{}",
-            sanitize(&app.name),
-            uuid::Uuid::new_v4().simple()
-        );
-        let running = self
-            .docker
-            .run_container(&image_tag, &container_name, &manifest, host_port)
-            .await
-            .context("running container")?;
-        let instance_id = Instance::create(
-            &self.db,
-            app_id,
-            build_id,
-            &running.container_id,
-            running.host_port as i64,
-        )
-        .await?;
-        info!(app = %app.name, instance_id, host_port, "instance started");
-
-        // 5. Point Caddy at the new instance (best-effort in dev).
-        let host = format!("{}.{}", app.domain, self.config.base_domain);
-        let upstream = format!("127.0.0.1:{host_port}");
-        if let Err(e) = self
-            .caddy
-            .sync_app_route(app_id, &host, &[upstream])
-            .await
-        {
-            warn!(app = %app.name, error = %e, "could not update Caddy route (is Caddy running?)");
-        }
-
-        // 6. Retire previously-running instances (simple stop-old-after-new).
-        self.retire_old_instances(app_id, instance_id).await;
+        // 4-6. Run a new instance, route it, retire old ones.
+        let (instance_id, host, host_port) = self
+            .run_and_route(&app, &manifest, build_id, &image_tag)
+            .await?;
 
         Ok(DeployResult {
             build_id,
@@ -113,6 +82,80 @@ impl Deployer {
             host,
             host_port,
         })
+    }
+
+    /// Roll back to a previous successful build: start a fresh instance from its
+    /// already-built image (no rebuild), re-route, and retire the current one.
+    pub async fn rollback(&self, build_id: i64) -> Result<DeployResult> {
+        let build = Build::get(&self.db, build_id)
+            .await
+            .context("loading build")?;
+        let image_tag = build
+            .image_tag
+            .clone()
+            .filter(|_| build.status == "success")
+            .ok_or_else(|| anyhow::anyhow!("build #{build_id} has no successful image"))?;
+
+        let app = App::get(&self.db, build.app_id).await.context("loading app")?;
+        let manifest_raw = app
+            .manifest
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("app has no manifest cached; deploy once first"))?;
+        let manifest = Manifest::parse(&manifest_raw).context("parsing cached manifest")?;
+
+        info!(app = %app.name, build_id, %image_tag, "rolling back");
+        let (instance_id, host, host_port) = self
+            .run_and_route(&app, &manifest, build_id, &image_tag)
+            .await?;
+
+        Ok(DeployResult {
+            build_id,
+            instance_id,
+            image_tag,
+            host,
+            host_port,
+        })
+    }
+
+    /// Start a container from `image_tag`, record the instance, point Caddy at
+    /// it, and retire previously-running instances. Shared by deploy + rollback.
+    async fn run_and_route(
+        &self,
+        app: &App,
+        manifest: &Manifest,
+        build_id: i64,
+        image_tag: &str,
+    ) -> Result<(i64, String, u16)> {
+        let host_port = pick_free_port().context("allocating host port")?;
+        let container_name = format!(
+            "sw-{}-{}",
+            sanitize(&app.name),
+            uuid::Uuid::new_v4().simple()
+        );
+        let running = self
+            .docker
+            .run_container(image_tag, &container_name, manifest, host_port)
+            .await
+            .context("running container")?;
+        let instance_id = Instance::create(
+            &self.db,
+            app.id,
+            build_id,
+            &running.container_id,
+            running.host_port as i64,
+        )
+        .await?;
+        info!(app = %app.name, instance_id, host_port, "instance started");
+
+        // Point Caddy at the new instance (best-effort in dev).
+        let host = format!("{}.{}", app.domain, self.config.base_domain);
+        let upstream = format!("127.0.0.1:{host_port}");
+        if let Err(e) = self.caddy.sync_app_route(app.id, &host, &[upstream]).await {
+            warn!(app = %app.name, error = %e, "could not update Caddy route (is Caddy running?)");
+        }
+
+        self.retire_old_instances(app.id, instance_id).await;
+        Ok((instance_id, host, host_port))
     }
 
     /// Stop and remove every running instance of the app except `keep`.

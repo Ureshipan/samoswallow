@@ -30,7 +30,7 @@ impl App {
         sqlx::query_as::<_, App>(
             "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
              webhook_secret, created_at \
-             FROM apps WHERE owner_id = ? ORDER BY created_at DESC",
+             FROM apps WHERE owner_id = ? ORDER BY created_at DESC, id DESC",
         )
         .bind(owner_id)
         .fetch_all(db)
@@ -141,10 +141,20 @@ impl Build {
     pub async fn list(db: &SqlitePool, app_id: i64) -> sqlx::Result<Vec<Build>> {
         sqlx::query_as::<_, Build>(
             "SELECT id, app_id, commit_sha, image_tag, status, logs, created_at, finished_at \
-             FROM builds WHERE app_id=? ORDER BY created_at DESC",
+             FROM builds WHERE app_id=? ORDER BY created_at DESC, id DESC",
         )
         .bind(app_id)
         .fetch_all(db)
+        .await
+    }
+
+    pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<Build> {
+        sqlx::query_as::<_, Build>(
+            "SELECT id, app_id, commit_sha, image_tag, status, logs, created_at, finished_at \
+             FROM builds WHERE id=?",
+        )
+        .bind(id)
+        .fetch_one(db)
         .await
     }
 }
@@ -185,7 +195,7 @@ impl Instance {
     pub async fn list_for_app(db: &SqlitePool, app_id: i64) -> sqlx::Result<Vec<Instance>> {
         sqlx::query_as::<_, Instance>(
             "SELECT id, app_id, build_id, container_id, host_port, status, created_at \
-             FROM instances WHERE app_id=? ORDER BY created_at DESC",
+             FROM instances WHERE app_id=? ORDER BY created_at DESC, id DESC",
         )
         .bind(app_id)
         .fetch_all(db)
@@ -195,7 +205,7 @@ impl Instance {
     pub async fn list_running_for_app(db: &SqlitePool, app_id: i64) -> sqlx::Result<Vec<Instance>> {
         sqlx::query_as::<_, Instance>(
             "SELECT id, app_id, build_id, container_id, host_port, status, created_at \
-             FROM instances WHERE app_id=? AND status='running' ORDER BY created_at DESC",
+             FROM instances WHERE app_id=? AND status='running' ORDER BY created_at DESC, id DESC",
         )
         .bind(app_id)
         .fetch_all(db)
