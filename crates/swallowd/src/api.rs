@@ -24,7 +24,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    fn deployer(&self) -> Deployer {
+    pub fn deployer(&self) -> Deployer {
         Deployer {
             db: self.db.clone(),
             docker: self.docker.clone(),

@@ -7,6 +7,7 @@ mod docker;
 mod error;
 mod manifest;
 mod models;
+mod web;
 
 use anyhow::Context;
 use tracing::{info, warn};
@@ -53,7 +54,7 @@ async fn main() -> anyhow::Result<()> {
         caddy,
         owner_id,
     };
-    let app = api::router(state);
+    let app = web::router(state.clone()).merge(api::router(state));
 
     info!("swallowd is listening");
     axum::serve(listener, app)

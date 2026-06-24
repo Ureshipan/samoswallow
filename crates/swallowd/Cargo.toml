@@ -27,3 +27,4 @@ futures-util.workspace = true
 tar.workspace = true
 reqwest.workspace = true
 uuid.workspace = true
+maud.workspace = true
