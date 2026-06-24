@@ -74,14 +74,14 @@ samoswallow/
 
 ## Дорожная карта
 
-**Фаза 1 — MVP (ядро):**
-1. Скелет: `swallowd` (axum), SQLite-схема + миграции, конфиг, systemd-юнит.
-2. Docker-слой через `bollard`: build / run / stop / logs / stats.
-3. CRUD App + парсер `swallow.yaml`.
-4. Деплой вручную из UI: clone → build → run один Instance.
-5. Caddy-интеграция: роут поддомена на инстанс.
-6. Auth (пароль + сессия), базовый веб-UI: список App, deploy/restart/stop, логи.
-7. `install.sh` / `uninstall.sh`.
+**Фаза 1 — MVP (ядро): ✅ готово**
+1. ✅ Скелет: `swallowd` (axum), SQLite-схема + миграции, конфиг, systemd-юнит.
+2. ✅ Docker-слой через `bollard`: build / run / stop / restart / logs / stats.
+3. ✅ CRUD App + парсер `swallow.yaml`.
+4. ✅ Деплой вручную из UI: clone → build → run Instance + ротация старых.
+5. ✅ Caddy-интеграция: роут поддомена на инстанс.
+6. ✅ Auth (пароль + сессия), веб-UI: список App, deploy/restart/stop, логи, нагрузка.
+7. ✅ `install.sh` / `uninstall.sh` (+ авто-установка Caddy, dev-скрипты).
 
 **Фаза 2:** webhooks-автодеплой, N инстансов + балансировка, метрики, откаты.
 
