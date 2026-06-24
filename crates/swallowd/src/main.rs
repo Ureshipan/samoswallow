@@ -6,7 +6,9 @@ mod db;
 mod deploy;
 mod docker;
 mod error;
+mod hooks;
 mod manifest;
+mod metrics;
 mod models;
 mod web;
 
@@ -47,6 +49,9 @@ async fn main() -> anyhow::Result<()> {
 
     let caddy = caddy::CaddyClient::new(config.caddy_admin_url.clone());
 
+    // Background sampler: records CPU/memory time-series for running instances.
+    metrics::spawn(db.clone(), docker.clone());
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .with_context(|| format!("binding {}", config.listen_addr))?;
@@ -62,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
     let app = web::router(state.clone())
         .merge(api::router(state.clone()))
         .merge(auth::router(state.clone()))
+        .merge(hooks::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,

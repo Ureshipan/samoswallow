@@ -1,0 +1,19 @@
+name: demo
+dockerfile: ./Dockerfile
+domain: demo                  # served at demo.<base-domain>
+
+ports:
+  - container: 8080
+
+env:
+  GREETING: "Привет из samoswallow!"   # change this in the UI and redeploy to see it update
+
+resources:
+  cpu: "0.5"
+  memory: "128m"             # /mem button will let you push toward this limit
+
+healthcheck:
+  path: /health
+
+scale:
+  default_instances: 1

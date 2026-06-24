@@ -136,7 +136,9 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     let path = req.uri().path();
-    if path == "/healthz" || path == "/login" {
+    // Public routes: health probe, login, and webhook deliveries (the latter
+    // authenticate via per-app HMAC signatures, not the session cookie).
+    if path == "/healthz" || path == "/login" || path.starts_with("/hooks/") {
         return next.run(req).await;
     }
 

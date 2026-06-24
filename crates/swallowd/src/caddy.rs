@@ -11,10 +11,26 @@ pub struct CaddyClient {
 
 impl CaddyClient {
     pub fn new(admin_url: impl Into<String>) -> Self {
+        // Short timeout so a down/unreachable Caddy fails fast instead of
+        // stalling deploys or the status check.
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_default();
         Self {
             admin_url: admin_url.into(),
-            http: reqwest::Client::new(),
+            http,
         }
+    }
+
+    /// Whether Caddy's Admin API is reachable (used for the UI status badge).
+    pub async fn is_online(&self) -> bool {
+        self.http
+            .get(format!("{}/config/", self.admin_url))
+            .send()
+            .await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
     }
 
     fn route_id(app_id: i64) -> String {

@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::api::AppState;
 use crate::error::{ApiError, ApiResult};
-use crate::models::{App, Build, Instance};
+use crate::models::{App, Build, Instance, Metric};
 
 /// Server-rendered web UI. Shares `AppState` with the JSON API.
 pub fn router(state: AppState) -> Router {
@@ -16,9 +16,12 @@ pub fn router(state: AppState) -> Router {
         .route("/apps", post(create_app))
         .route("/apps/{id}", get(app_detail))
         .route("/apps/{id}/deploy", post(deploy_app))
+        .route("/apps/{id}/settings", post(update_app_settings))
         .route("/apps/{id}/delete", post(delete_app))
         .route("/instances/{id}/restart", post(restart_instance))
         .route("/instances/{id}/stop", post(stop_instance))
+        .route("/builds/{id}/rollback", post(rollback_build))
+        .route("/instances/{id}/logs", get(instance_logs_page))
         .with_state(state)
 }
 
@@ -50,6 +53,30 @@ label { display: block; font-size: 13px; color: #9aa3af; margin-bottom: 4px; }
 .muted { color: #9aa3af; font-size: 13px; }
 .mono { font-family: ui-monospace, monospace; font-size: 12px; }
 pre { background: #0f1115; border: 1px solid #2a2e36; border-radius: 8px; padding: 12px; overflow: auto; max-height: 360px; font-size: 12px; }
+.badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid #3a3f49; color: #9aa3af; }
+.badge.online { background: #163b22; color: #6ee787; border-color: #245a35; }
+.badge.offline { background: #3b1616; color: #ff8b8b; border-color: #5a2a2a; }
+"#;
+
+/// Polls the Caddy status endpoint and updates the header badge.
+const CADDY_BADGE_JS: &str = r#"
+(function () {
+  const el = document.getElementById('caddy-badge');
+  if (!el) return;
+  async function tick() {
+    try {
+      const r = await fetch('/api/caddy/status');
+      const d = await r.json();
+      el.textContent = 'Caddy: ' + (d.online ? 'онлайн' : 'офлайн');
+      el.className = 'badge ' + (d.online ? 'online' : 'offline');
+    } catch (e) {
+      el.textContent = 'Caddy: ?';
+      el.className = 'badge';
+    }
+  }
+  tick();
+  setInterval(tick, 10000);
+})();
 "#;
 
 fn layout(title: &str, body: Markup) -> Markup {
@@ -65,11 +92,15 @@ fn layout(title: &str, body: Markup) -> Markup {
             body {
                 header class="row" {
                     a href="/" { "🚛 samoswallow" }
-                    form class="inline" method="post" action="/logout" {
-                        button type="submit" { "Выйти" }
+                    div class="row" style="gap:12px" {
+                        span id="caddy-badge" class="badge" title="Статус reverse-proxy Caddy" { "Caddy: …" }
+                        form class="inline" method="post" action="/logout" {
+                            button type="submit" { "Выйти" }
+                        }
                     }
                 }
                 main { (body) }
+                script { (maud::PreEscaped(CADDY_BADGE_JS)) }
             }
         }
     }
@@ -85,22 +116,53 @@ async fn dashboard(State(state): State<AppState>) -> ApiResult<Markup> {
     let apps = App::list(&state.db, state.owner_id).await?;
     let base = state.config.base_domain.clone();
 
+    // Gather a small summary per app: instance counts + a direct link to a
+    // running instance (the newest one), if any.
+    struct Summary {
+        app: App,
+        running: i64,
+        total: i64,
+        open_port: Option<i64>,
+    }
+    let mut summaries = Vec::with_capacity(apps.len());
+    for app in apps {
+        let (running, total) = Instance::counts_for_app(&state.db, app.id).await?;
+        let open_port = Instance::list_running_for_app(&state.db, app.id)
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().next())
+            .and_then(|i| i.host_port);
+        summaries.push(Summary { app, running, total, open_port });
+    }
+
     Ok(layout(
         "dashboard",
         html! {
             div class="row" { h1 { "Приложения" } }
 
-            @if apps.is_empty() {
+            @if summaries.is_empty() {
                 div class="card muted" { "Пока нет приложений. Добавь первое ниже." }
             }
-            @for app in &apps {
+            @for s in &summaries {
                 div class="card" {
                     div class="row" {
                         div {
-                            a href={ "/apps/" (app.id) } { h2 style="margin:0" { (app.name) } }
-                            div class="muted mono" { (app.domain) "." (base) " ← " (app.repo_url) }
+                            a href={ "/apps/" (s.app.id) } { h2 style="margin:0" { (s.app.name) } }
+                            div class="muted mono" { (s.app.domain) "." (base) " ← " (s.app.repo_url) }
+                            div style="margin-top:6px" {
+                                @if s.running > 0 {
+                                    span class="tag running" { "● " (s.running) " запущено" }
+                                } @else {
+                                    span class="tag stopped" { "нет запущенных" }
+                                }
+                                span class="muted" { " · всего инстансов: " (s.total) }
+                                @if let Some(port) = s.open_port {
+                                    " "
+                                    a href={ "http://127.0.0.1:" (port) "/" } target="_blank" { "открыть ↗" }
+                                }
+                            }
                         }
-                        form class="inline" method="post" action={ "/apps/" (app.id) "/deploy" } {
+                        form class="inline" method="post" action={ "/apps/" (s.app.id) "/deploy" } {
                             button class="primary" type="submit" { "Deploy" }
                         }
                     }
@@ -114,7 +176,7 @@ async fn dashboard(State(state): State<AppState>) -> ApiResult<Markup> {
                         div { label { "Имя" } input type="text" name="name" placeholder="my-app" required; }
                         div { label { "Поддомен" } input type="text" name="domain" placeholder="my-app" required; }
                         div { label { "Git репозиторий (URL)" } input type="text" name="repo_url" placeholder="https://github.com/you/my-app" required; }
-                        div { label { "Ветка" } input type="text" name="default_branch" value="master"; }
+                        div { label { "Ветка" } input type="text" name="default_branch" value="main"; }
                     }
                     div style="margin-top:12px" { button class="primary" type="submit" { "Создать" } }
                 }
@@ -137,7 +199,7 @@ async fn create_app(
     Form(form): Form<CreateAppForm>,
 ) -> ApiResult<Redirect> {
     let branch = if form.default_branch.trim().is_empty() {
-        "master"
+        "main"
     } else {
         form.default_branch.trim()
     };
@@ -165,15 +227,25 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
     let instances = Instance::list_for_app(&state.db, id).await?;
     let base = state.config.base_domain.clone();
 
-    // Best-effort live stats for running instances.
+    // Best-effort live stats + recorded history for running instances.
     let mut stats = std::collections::HashMap::new();
+    let mut history = std::collections::HashMap::new();
     for inst in instances.iter().filter(|i| i.status == "running") {
         if let Some(cid) = &inst.container_id {
             if let Ok(s) = state.docker.stats_snapshot(cid).await {
                 stats.insert(inst.id, s);
             }
         }
+        if let Ok(m) = Metric::recent(&state.db, inst.id).await {
+            history.insert(inst.id, m);
+        }
     }
+
+    // A direct, always-working link to the newest running instance.
+    let open_port = instances
+        .iter()
+        .find(|i| i.status == "running")
+        .and_then(|i| i.host_port);
 
     Ok(layout(
         &app.name,
@@ -181,9 +253,23 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
             div class="row" {
                 div {
                     h1 style="margin-bottom:4px" { (app.name) }
-                    div class="muted mono" {
-                        a href={ "http://" (app.domain) "." (base) } { (app.domain) "." (base) }
-                        " ← " (app.repo_url) " (" (app.default_branch) ")"
+                    div class="muted mono" { (app.repo_url) " (" (app.default_branch) ")" }
+                    div style="margin-top:6px" {
+                        @if let Some(port) = open_port {
+                            a href={ "http://127.0.0.1:" (port) "/" } target="_blank" { "открыть ↗ http://127.0.0.1:" (port) }
+                        } @else {
+                            span class="muted" { "нет запущенных инстансов" }
+                        }
+                    }
+                    div class="muted" style="margin-top:4px; font-size:12px" {
+                        "Публичный адрес: " code { (app.domain) "." (base) }
+                        " (работает, когда поднят Caddy и домен указывает на сервер)"
+                    }
+                    @if let Some(port) = app.external_port {
+                        div class="muted" style="margin-top:4px; font-size:12px" {
+                            "Внешний порт: " code { "0.0.0.0:" (port) }
+                            " (прямой доступ снаружи, помимо Caddy)"
+                        }
                     }
                 }
                 div {
@@ -199,31 +285,91 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
             }
 
             div class="card" {
+                h2 { "Webhook (автодеплой по push)" }
+                p class="muted" {
+                    "Добавь webhook в настройках GitHub-репозитория. При push в ветку "
+                    code { (app.default_branch) } " самосвал пересоберёт и передеплоит приложение."
+                }
+                table {
+                    tr { th { "Payload URL" } td class="mono" { "http://<хост-самосвала>/hooks/" (app.id) } }
+                    tr { th { "Content type" } td class="mono" { "application/json" } }
+                    tr { th { "Secret" } td class="mono" { (app.webhook_secret.clone().unwrap_or_default()) } }
+                }
+            }
+
+            div class="card" {
+                h2 { "Настройки" }
+                form method="post" action={ "/apps/" (app.id) "/settings" } {
+                    label for="external_port" { "Внешний порт" }
+                    div class="row" style="justify-content:flex-start; gap:10px" {
+                        input type="text" inputmode="numeric" name="external_port"
+                            id="external_port" placeholder="напр. 8081"
+                            value=(app.external_port.map(|p| p.to_string()).unwrap_or_default())
+                            style="max-width:160px";
+                        button class="primary" type="submit" { "Сохранить" }
+                    }
+                    p class="muted" style="margin-top:8px" {
+                        "Если задан, инстансы публикуются напрямую на "
+                        code { "0.0.0.0:<порт>" }
+                        " и доступны снаружи (помимо поддомена Caddy). "
+                        "При деплое старый инстанс гасится до запуска нового — короткий простой. "
+                        "Пусто — случайный порт на " code { "127.0.0.1" } ", только через Caddy."
+                    }
+                }
+            }
+
+            div class="card" {
                 h2 { "Инстансы" }
                 @if instances.is_empty() {
                     div class="muted" { "Ещё не деплоился." }
                 } @else {
                     table {
                         thead { tr {
-                            th { "ID" } th { "Статус" } th { "Порт" } th { "CPU" } th { "RAM" }
-                            th { "Создан" } th { "" }
+                            th { "ID" } th { "Статус" } th { "Адрес" } th { "CPU" } th { "RAM" }
+                            th { "" }
                         } }
                         tbody {
                             @for inst in &instances {
+                                @let hist = history.get(&inst.id);
                                 tr {
                                     td { "#" (inst.id) }
                                     td { (status_tag(&inst.status)) }
-                                    td class="mono" { (inst.host_port.map(|p| p.to_string()).unwrap_or_default()) }
-                                    @match stats.get(&inst.id) {
-                                        Some(s) => {
-                                            td class="mono" { (format!("{:.1}%", s.cpu_percent)) }
-                                            td class="mono" { (fmt_bytes(s.memory_bytes)) "/" (fmt_bytes(s.memory_limit_bytes)) }
+                                    td class="mono" {
+                                        @match (inst.status.as_str(), inst.host_port) {
+                                            ("running", Some(port)) => {
+                                                a href={ "http://127.0.0.1:" (port) "/" } target="_blank" { "127.0.0.1:" (port) " ↗" }
+                                            }
+                                            (_, Some(port)) => { span class="muted" { (port) } }
+                                            _ => { span class="muted" { "—" } }
                                         }
-                                        None => { td class="muted" { "—" } td class="muted" { "—" } }
                                     }
-                                    td class="muted" { (inst.created_at) }
                                     td {
+                                        @match stats.get(&inst.id) {
+                                            Some(s) => { div class="mono" { (format!("{:.1}%", s.cpu_percent)) } }
+                                            None => { div class="muted" { "—" } }
+                                        }
+                                        @if let Some(h) = hist {
+                                            @let vals: Vec<f64> = h.iter().map(|m| m.cpu_percent).collect();
+                                            @let mx = vals.iter().cloned().fold(1.0_f64, f64::max);
+                                            (sparkline(&vals, mx, "#6ee787"))
+                                        }
+                                    }
+                                    td {
+                                        @match stats.get(&inst.id) {
+                                            Some(s) => { div class="mono" { (fmt_bytes(s.memory_bytes)) "/" (fmt_bytes(s.memory_limit_bytes)) } }
+                                            None => { div class="muted" { "—" } }
+                                        }
+                                        @if let Some(h) = hist {
+                                            @let vals: Vec<f64> = h.iter().map(|m| m.memory_bytes as f64).collect();
+                                            @let lim = h.last().map(|m| m.memory_limit_bytes as f64).filter(|v| *v > 0.0);
+                                            @let mx = lim.unwrap_or_else(|| vals.iter().cloned().fold(1.0_f64, f64::max));
+                                            (sparkline(&vals, mx, "#6fb3ff"))
+                                        }
+                                    }
+                                    td {
+                                        a href={ "/instances/" (inst.id) "/logs" } { "логи" }
                                         @if inst.status == "running" {
+                                            " "
                                             form class="inline" method="post" action={ "/instances/" (inst.id) "/restart" } {
                                                 button type="submit" { "Restart" }
                                             }
@@ -246,7 +392,7 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                     div class="muted" { "Сборок ещё нет." }
                 } @else {
                     table {
-                        thead { tr { th { "ID" } th { "Commit" } th { "Статус" } th { "Образ" } th { "Когда" } } }
+                        thead { tr { th { "ID" } th { "Commit" } th { "Статус" } th { "Образ" } th { "Когда" } th { "" } } }
                         tbody {
                             @for b in &builds {
                                 tr {
@@ -255,6 +401,13 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                                     td { (status_tag(&b.status)) }
                                     td class="mono" { (b.image_tag.clone().unwrap_or_default()) }
                                     td class="muted" { (b.created_at) }
+                                    td {
+                                        @if b.status == "success" {
+                                            form class="inline" method="post" action={ "/builds/" (b.id) "/rollback" } {
+                                                button type="submit" { "Откатить сюда" }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -281,6 +434,31 @@ async fn deploy_app(State(state): State<AppState>, Path(id): Path<i64>) -> Respo
     }
 }
 
+#[derive(Deserialize)]
+struct SettingsForm {
+    #[serde(default)]
+    external_port: String,
+}
+
+async fn update_app_settings(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Form(form): Form<SettingsForm>,
+) -> ApiResult<Redirect> {
+    App::get(&state.db, id).await?;
+    // Empty field clears the port; otherwise it must parse as a number.
+    let port = match form.external_port.trim() {
+        "" => None,
+        s => Some(
+            s.parse::<i64>()
+                .map_err(|_| ApiError::BadRequest("external port must be a number".into()))?,
+        ),
+    };
+    let port = crate::api::validate_external_port(port)?;
+    App::set_external_port(&state.db, id, port).await?;
+    Ok(Redirect::to(&format!("/apps/{id}")))
+}
+
 async fn delete_app(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Redirect> {
     if let Ok(instances) = Instance::list_running_for_app(&state.db, id).await {
         for inst in instances {
@@ -292,6 +470,49 @@ async fn delete_app(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
     let _ = state.caddy.remove_app_route(id).await;
     App::delete(&state.db, id).await?;
     Ok(Redirect::to("/"))
+}
+
+async fn instance_logs_page(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Markup> {
+    let inst = Instance::get(&state.db, id).await?;
+    let logs = match &inst.container_id {
+        Some(cid) => state
+            .docker
+            .logs(cid, "500")
+            .await
+            .unwrap_or_else(|e| format!("(не удалось получить логи: {e})")),
+        None => "(у инстанса нет контейнера)".to_string(),
+    };
+    let body = if logs.trim().is_empty() {
+        "(пусто — приложение ничего не вывело в stdout/stderr)".to_string()
+    } else {
+        logs
+    };
+
+    Ok(layout(
+        &format!("логи инстанса #{id}"),
+        html! {
+            div class="row" {
+                h1 { "Логи инстанса #" (id) }
+                a href={ "/apps/" (inst.app_id) } { "← к приложению" }
+            }
+            p class="muted" { "Последние 500 строк. Размер логов контейнера ограничен (10 МБ × 3)." }
+            pre { (body) }
+        },
+    ))
+}
+
+async fn rollback_build(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+    let app_id = match Build::get(&state.db, id).await {
+        Ok(b) => b.app_id,
+        Err(e) => return ApiError::from(e).into_response(),
+    };
+    match state.deployer().rollback(id).await {
+        Ok(_) => Redirect::to(&format!("/apps/{app_id}")).into_response(),
+        Err(e) => ApiError::Internal(e).into_response(),
+    }
 }
 
 async fn restart_instance(
@@ -319,6 +540,33 @@ async fn stop_instance(State(state): State<AppState>, Path(id): Path<i64>) -> Ap
     }
     Instance::set_status(&state.db, id, "stopped").await?;
     Ok(Redirect::to(&format!("/apps/{app_id}")))
+}
+
+/// Render a tiny inline SVG sparkline from a series of values, scaled to `max`.
+fn sparkline(values: &[f64], max: f64, color: &str) -> Markup {
+    const W: f64 = 110.0;
+    const H: f64 = 26.0;
+    if values.len() < 2 {
+        return html! { span class="muted" { "—" } };
+    }
+    let max = max.max(1e-9);
+    let n = values.len() as f64;
+    let pts: String = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = (i as f64) / (n - 1.0) * W;
+            let y = H - (v / max).clamp(0.0, 1.0) * H;
+            format!("{x:.1},{y:.1}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let svg = format!(
+        "<svg width=\"{W}\" height=\"{H}\" viewBox=\"0 0 {W} {H}\" preserveAspectRatio=\"none\" \
+         style=\"vertical-align:middle\"><polyline fill=\"none\" stroke=\"{color}\" \
+         stroke-width=\"1.5\" points=\"{pts}\"/></svg>"
+    );
+    html! { (maud::PreEscaped(svg)) }
 }
 
 fn fmt_bytes(b: u64) -> String {

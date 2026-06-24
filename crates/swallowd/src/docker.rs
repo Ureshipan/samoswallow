@@ -77,12 +77,17 @@ impl DockerEngine {
 
     /// Create and start a container for the given image, publishing the app's
     /// primary port on `host_port`.
+    ///
+    /// When `external` is true the port is bound to `0.0.0.0` so the service is
+    /// reachable directly from outside the host; otherwise it is bound to
+    /// `127.0.0.1` and only Caddy (running locally) can reach it.
     pub async fn run_container(
         &self,
         image: &str,
         name: &str,
         manifest: &Manifest,
         host_port: u16,
+        external: bool,
     ) -> Result<RunningContainer> {
         let container_port = manifest.primary_port();
         let port_key = format!("{container_port}/tcp");
@@ -90,11 +95,12 @@ impl DockerEngine {
         let mut exposed = HashMap::new();
         exposed.insert(port_key.clone(), HashMap::new());
 
+        let host_ip = if external { "0.0.0.0" } else { "127.0.0.1" };
         let mut bindings = HashMap::new();
         bindings.insert(
             port_key,
             Some(vec![PortBinding {
-                host_ip: Some("127.0.0.1".to_string()),
+                host_ip: Some(host_ip.to_string()),
                 host_port: Some(host_port.to_string()),
             }]),
         );
@@ -105,6 +111,11 @@ impl DockerEngine {
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
 
+        // Cap container logs so they can't fill the disk: 3 rotated 10MB files.
+        let mut log_opts = HashMap::new();
+        log_opts.insert("max-size".to_string(), "10m".to_string());
+        log_opts.insert("max-file".to_string(), "3".to_string());
+
         let host_config = HostConfig {
             port_bindings: Some(bindings),
             memory: parse_memory(manifest.resources.memory.as_deref()),
@@ -112,6 +123,10 @@ impl DockerEngine {
             restart_policy: Some(bollard::models::RestartPolicy {
                 name: Some(bollard::models::RestartPolicyNameEnum::ON_FAILURE),
                 maximum_retry_count: Some(5),
+            }),
+            log_config: Some(bollard::models::HostConfigLogConfig {
+                typ: Some("json-file".to_string()),
+                config: Some(log_opts),
             }),
             ..Default::default()
         };

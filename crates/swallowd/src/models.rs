@@ -1,5 +1,14 @@
+use rand::Rng;
 use serde::Serialize;
 use sqlx::SqlitePool;
+
+/// Generate a random alphanumeric token of the given length.
+pub fn random_token(len: usize) -> String {
+    let mut rng = rand::thread_rng();
+    (0..len)
+        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .collect()
+}
 
 /// An App: a git repo plus its manifest. A template instances are created from.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -11,14 +20,21 @@ pub struct App {
     pub default_branch: String,
     pub domain: String,
     pub manifest: Option<String>,
+    /// Secret used to verify incoming push webhooks (HMAC-SHA256).
+    pub webhook_secret: Option<String>,
+    /// Fixed host port to publish instances on (bound to 0.0.0.0). When `None`,
+    /// a random localhost port is assigned per instance and traffic only flows
+    /// through Caddy.
+    pub external_port: Option<i64>,
     pub created_at: String,
 }
 
 impl App {
     pub async fn list(db: &SqlitePool, owner_id: i64) -> sqlx::Result<Vec<App>> {
         sqlx::query_as::<_, App>(
-            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, created_at \
-             FROM apps WHERE owner_id = ? ORDER BY created_at DESC",
+            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
+             webhook_secret, external_port, created_at \
+             FROM apps WHERE owner_id = ? ORDER BY created_at DESC, id DESC",
         )
         .bind(owner_id)
         .fetch_all(db)
@@ -27,7 +43,8 @@ impl App {
 
     pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<App> {
         sqlx::query_as::<_, App>(
-            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, created_at \
+            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
+             webhook_secret, external_port, created_at \
              FROM apps WHERE id = ?",
         )
         .bind(id)
@@ -43,15 +60,17 @@ impl App {
         default_branch: &str,
         domain: &str,
     ) -> sqlx::Result<App> {
+        let secret = random_token(40);
         let id = sqlx::query(
-            "INSERT INTO apps (owner_id, name, repo_url, default_branch, domain) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO apps (owner_id, name, repo_url, default_branch, domain, webhook_secret) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(owner_id)
         .bind(name)
         .bind(repo_url)
         .bind(default_branch)
         .bind(domain)
+        .bind(&secret)
         .execute(db)
         .await?
         .last_insert_rowid();
@@ -66,6 +85,20 @@ impl App {
             .await?
             .rows_affected();
         Ok(affected > 0)
+    }
+
+    /// Set (or clear, with `None`) the fixed external port for an app.
+    pub async fn set_external_port(
+        db: &SqlitePool,
+        id: i64,
+        port: Option<i64>,
+    ) -> sqlx::Result<()> {
+        sqlx::query("UPDATE apps SET external_port = ? WHERE id = ?")
+            .bind(port)
+            .bind(id)
+            .execute(db)
+            .await?;
+        Ok(())
     }
 }
 
@@ -126,10 +159,20 @@ impl Build {
     pub async fn list(db: &SqlitePool, app_id: i64) -> sqlx::Result<Vec<Build>> {
         sqlx::query_as::<_, Build>(
             "SELECT id, app_id, commit_sha, image_tag, status, logs, created_at, finished_at \
-             FROM builds WHERE app_id=? ORDER BY created_at DESC",
+             FROM builds WHERE app_id=? ORDER BY created_at DESC, id DESC",
         )
         .bind(app_id)
         .fetch_all(db)
+        .await
+    }
+
+    pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<Build> {
+        sqlx::query_as::<_, Build>(
+            "SELECT id, app_id, commit_sha, image_tag, status, logs, created_at, finished_at \
+             FROM builds WHERE id=?",
+        )
+        .bind(id)
+        .fetch_one(db)
         .await
     }
 }
@@ -170,7 +213,7 @@ impl Instance {
     pub async fn list_for_app(db: &SqlitePool, app_id: i64) -> sqlx::Result<Vec<Instance>> {
         sqlx::query_as::<_, Instance>(
             "SELECT id, app_id, build_id, container_id, host_port, status, created_at \
-             FROM instances WHERE app_id=? ORDER BY created_at DESC",
+             FROM instances WHERE app_id=? ORDER BY created_at DESC, id DESC",
         )
         .bind(app_id)
         .fetch_all(db)
@@ -180,11 +223,36 @@ impl Instance {
     pub async fn list_running_for_app(db: &SqlitePool, app_id: i64) -> sqlx::Result<Vec<Instance>> {
         sqlx::query_as::<_, Instance>(
             "SELECT id, app_id, build_id, container_id, host_port, status, created_at \
-             FROM instances WHERE app_id=? AND status='running' ORDER BY created_at DESC",
+             FROM instances WHERE app_id=? AND status='running' ORDER BY created_at DESC, id DESC",
         )
         .bind(app_id)
         .fetch_all(db)
         .await
+    }
+
+    /// All running instances across every app (used by the metrics sampler).
+    pub async fn list_all_running(db: &SqlitePool) -> sqlx::Result<Vec<Instance>> {
+        sqlx::query_as::<_, Instance>(
+            "SELECT id, app_id, build_id, container_id, host_port, status, created_at \
+             FROM instances WHERE status='running'",
+        )
+        .fetch_all(db)
+        .await
+    }
+
+    /// (running, total) instance counts for an app.
+    pub async fn counts_for_app(db: &SqlitePool, app_id: i64) -> sqlx::Result<(i64, i64)> {
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM instances WHERE app_id=? AND status='running'",
+        )
+        .bind(app_id)
+        .fetch_one(db)
+        .await?;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM instances WHERE app_id=?")
+            .bind(app_id)
+            .fetch_one(db)
+            .await?;
+        Ok((running, total))
     }
 
     pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<Instance> {
@@ -204,6 +272,66 @@ impl Instance {
             .execute(db)
             .await?;
         Ok(())
+    }
+}
+
+/// A single time-series resource sample for an instance.
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct Metric {
+    pub ts: String,
+    pub cpu_percent: f64,
+    pub memory_bytes: i64,
+    pub memory_limit_bytes: i64,
+}
+
+impl Metric {
+    /// Maximum samples kept per instance (~30 min at one sample / 15s).
+    pub const RETENTION: i64 = 120;
+
+    /// Record a sample and prune old ones for that instance.
+    pub async fn record(
+        db: &SqlitePool,
+        instance_id: i64,
+        cpu_percent: f64,
+        memory_bytes: i64,
+        memory_limit_bytes: i64,
+    ) -> sqlx::Result<()> {
+        sqlx::query(
+            "INSERT INTO metrics (instance_id, cpu_percent, memory_bytes, memory_limit_bytes) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(instance_id)
+        .bind(cpu_percent)
+        .bind(memory_bytes)
+        .bind(memory_limit_bytes)
+        .execute(db)
+        .await?;
+
+        // Keep only the most recent RETENTION rows for this instance.
+        sqlx::query(
+            "DELETE FROM metrics WHERE instance_id=? AND id NOT IN \
+             (SELECT id FROM metrics WHERE instance_id=? ORDER BY id DESC LIMIT ?)",
+        )
+        .bind(instance_id)
+        .bind(instance_id)
+        .bind(Self::RETENTION)
+        .execute(db)
+        .await?;
+        Ok(())
+    }
+
+    /// Recent samples for an instance, oldest first (ready for plotting).
+    pub async fn recent(db: &SqlitePool, instance_id: i64) -> sqlx::Result<Vec<Metric>> {
+        let mut rows = sqlx::query_as::<_, Metric>(
+            "SELECT ts, cpu_percent, memory_bytes, memory_limit_bytes \
+             FROM metrics WHERE instance_id=? ORDER BY id DESC LIMIT ?",
+        )
+        .bind(instance_id)
+        .bind(Self::RETENTION)
+        .fetch_all(db)
+        .await?;
+        rows.reverse();
+        Ok(rows)
     }
 }
 

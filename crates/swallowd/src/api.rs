@@ -39,10 +39,13 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/version", get(version))
+        .route("/api/caddy/status", get(caddy_status))
         .route("/api/apps", get(list_apps).post(create_app))
         .route("/api/apps/{id}", get(get_app).delete(delete_app))
+        .route("/api/apps/{id}/settings", post(update_app_settings))
         .route("/api/apps/{id}/deploy", post(deploy_app))
         .route("/api/apps/{id}/builds", get(list_builds))
+        .route("/api/builds/{id}/rollback", post(rollback_build))
         .route("/api/apps/{id}/instances", get(list_instances))
         .route("/api/instances/{id}/restart", post(restart_instance))
         .route("/api/instances/{id}/stop", post(stop_instance))
@@ -81,6 +84,17 @@ async fn version(State(state): State<AppState>) -> Json<Version> {
     })
 }
 
+#[derive(Serialize)]
+struct CaddyStatus {
+    online: bool,
+}
+
+async fn caddy_status(State(state): State<AppState>) -> Json<CaddyStatus> {
+    Json(CaddyStatus {
+        online: state.caddy.is_online().await,
+    })
+}
+
 // --- Apps ------------------------------------------------------------------
 
 async fn list_apps(State(state): State<AppState>) -> ApiResult<Json<Vec<App>>> {
@@ -101,7 +115,7 @@ struct CreateApp {
 }
 
 fn default_branch() -> String {
-    "master".to_string()
+    "main".to_string()
 }
 
 async fn create_app(
@@ -128,6 +142,35 @@ async fn create_app(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(app)))
+}
+
+#[derive(Deserialize)]
+struct UpdateSettings {
+    /// Fixed host port to publish instances on; `null` clears it (Caddy-only).
+    external_port: Option<i64>,
+}
+
+async fn update_app_settings(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(body): Json<UpdateSettings>,
+) -> ApiResult<Json<App>> {
+    App::get(&state.db, id).await?;
+    let port = validate_external_port(body.external_port)?;
+    App::set_external_port(&state.db, id, port).await?;
+    Ok(Json(App::get(&state.db, id).await?))
+}
+
+/// Validate a user-supplied external port: must be in 1..=65535, or `None` to
+/// clear. Returns the normalized value to store.
+pub(crate) fn validate_external_port(port: Option<i64>) -> Result<Option<i64>, ApiError> {
+    match port {
+        None => Ok(None),
+        Some(p) if (1..=65535).contains(&p) => Ok(Some(p)),
+        Some(p) => Err(ApiError::BadRequest(format!(
+            "external_port {p} is out of range (1-65535)"
+        ))),
+    }
 }
 
 async fn delete_app(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<StatusCode> {
@@ -169,6 +212,18 @@ async fn list_builds(
     Path(id): Path<i64>,
 ) -> ApiResult<Json<Vec<Build>>> {
     Ok(Json(Build::list(&state.db, id).await?))
+}
+
+async fn rollback_build(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Json<DeployResult>> {
+    let result = state
+        .deployer()
+        .rollback(id)
+        .await
+        .map_err(ApiError::Internal)?;
+    Ok(Json(result))
 }
 
 async fn list_instances(
@@ -250,4 +305,20 @@ async fn instance_stats(
         .await
         .map_err(ApiError::Internal)?;
     Ok(Json(stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn external_port_validation() {
+        assert_eq!(validate_external_port(None).unwrap(), None);
+        assert_eq!(validate_external_port(Some(8081)).unwrap(), Some(8081));
+        assert_eq!(validate_external_port(Some(1)).unwrap(), Some(1));
+        assert_eq!(validate_external_port(Some(65535)).unwrap(), Some(65535));
+        assert!(validate_external_port(Some(0)).is_err());
+        assert!(validate_external_port(Some(65536)).is_err());
+        assert!(validate_external_port(Some(-1)).is_err());
+    }
 }
