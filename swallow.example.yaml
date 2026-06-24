@@ -1,0 +1,23 @@
+# Drop this file as `swallow.yaml` in the root of your app's repo.
+# samoswallow reads it to know how to build, run and route your service.
+
+name: my-app                 # logical name of the app
+dockerfile: ./Dockerfile     # path to the Dockerfile used to build the image
+domain: my-app               # served at my-app.<base-domain>
+
+ports:
+  - container: 3000          # port your app listens on inside the container
+                             # (the host port is assigned automatically)
+
+env:
+  NODE_ENV: production       # plain env vars; put secrets in the web UI instead
+
+resources:
+  cpu: "0.5"                 # cpu limit (cores)
+  memory: "256m"            # memory limit
+
+healthcheck:
+  path: /health             # HTTP path polled to decide an instance is healthy
+
+scale:
+  default_instances: 1      # how many instances to start on deploy
