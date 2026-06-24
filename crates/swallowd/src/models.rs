@@ -1,5 +1,14 @@
+use rand::Rng;
 use serde::Serialize;
 use sqlx::SqlitePool;
+
+/// Generate a random alphanumeric token of the given length.
+pub fn random_token(len: usize) -> String {
+    let mut rng = rand::thread_rng();
+    (0..len)
+        .map(|_| rng.sample(rand::distributions::Alphanumeric) as char)
+        .collect()
+}
 
 /// An App: a git repo plus its manifest. A template instances are created from.
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
@@ -11,13 +20,16 @@ pub struct App {
     pub default_branch: String,
     pub domain: String,
     pub manifest: Option<String>,
+    /// Secret used to verify incoming push webhooks (HMAC-SHA256).
+    pub webhook_secret: Option<String>,
     pub created_at: String,
 }
 
 impl App {
     pub async fn list(db: &SqlitePool, owner_id: i64) -> sqlx::Result<Vec<App>> {
         sqlx::query_as::<_, App>(
-            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, created_at \
+            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
+             webhook_secret, created_at \
              FROM apps WHERE owner_id = ? ORDER BY created_at DESC",
         )
         .bind(owner_id)
@@ -27,7 +39,8 @@ impl App {
 
     pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<App> {
         sqlx::query_as::<_, App>(
-            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, created_at \
+            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
+             webhook_secret, created_at \
              FROM apps WHERE id = ?",
         )
         .bind(id)
@@ -43,15 +56,17 @@ impl App {
         default_branch: &str,
         domain: &str,
     ) -> sqlx::Result<App> {
+        let secret = random_token(40);
         let id = sqlx::query(
-            "INSERT INTO apps (owner_id, name, repo_url, default_branch, domain) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO apps (owner_id, name, repo_url, default_branch, domain, webhook_secret) \
+             VALUES (?, ?, ?, ?, ?, ?)",
         )
         .bind(owner_id)
         .bind(name)
         .bind(repo_url)
         .bind(default_branch)
         .bind(domain)
+        .bind(&secret)
         .execute(db)
         .await?
         .last_insert_rowid();

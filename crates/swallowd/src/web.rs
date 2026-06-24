@@ -199,6 +199,19 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
             }
 
             div class="card" {
+                h2 { "Webhook (автодеплой по push)" }
+                p class="muted" {
+                    "Добавь webhook в настройках GitHub-репозитория. При push в ветку "
+                    code { (app.default_branch) } " самосвал пересоберёт и передеплоит приложение."
+                }
+                table {
+                    tr { th { "Payload URL" } td class="mono" { "http://<хост-самосвала>/hooks/" (app.id) } }
+                    tr { th { "Content type" } td class="mono" { "application/json" } }
+                    tr { th { "Secret" } td class="mono" { (app.webhook_secret.clone().unwrap_or_default()) } }
+                }
+            }
+
+            div class="card" {
                 h2 { "Инстансы" }
                 @if instances.is_empty() {
                     div class="muted" { "Ещё не деплоился." }

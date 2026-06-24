@@ -6,6 +6,7 @@ mod db;
 mod deploy;
 mod docker;
 mod error;
+mod hooks;
 mod manifest;
 mod models;
 mod web;
@@ -62,6 +63,7 @@ async fn main() -> anyhow::Result<()> {
     let app = web::router(state.clone())
         .merge(api::router(state.clone()))
         .merge(auth::router(state.clone()))
+        .merge(hooks::router(state.clone()))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth::require_auth,
