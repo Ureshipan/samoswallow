@@ -50,6 +50,9 @@ SWALLOW_LISTEN=127.0.0.1:8080
 SWALLOW_DATABASE_URL=sqlite://$STATE_DIR/state.db?mode=rwc
 SWALLOW_BASE_DOMAIN=localhost
 SWALLOW_LOG=info
+# Set a password for the web UI (user: admin). If left unset, a random one is
+# generated on first start and printed to the journal (journalctl -u swallowd).
+#SWALLOW_ADMIN_PASSWORD=change-me
 EOF
 fi
 

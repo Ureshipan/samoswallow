@@ -19,6 +19,7 @@ pub struct AppState {
     pub config: Config,
     pub docker: DockerEngine,
     pub caddy: CaddyClient,
+    pub sessions: crate::auth::SessionStore,
     /// Single-user mode: every app belongs to this user.
     pub owner_id: i64,
 }

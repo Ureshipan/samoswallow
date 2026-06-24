@@ -217,6 +217,24 @@ pub async fn set_app_manifest(db: &SqlitePool, app_id: i64, manifest: &str) -> s
     Ok(())
 }
 
+/// Fetch a user's stored password hash by id.
+pub async fn user_password_hash(db: &SqlitePool, user_id: i64) -> sqlx::Result<String> {
+    sqlx::query_scalar::<_, String>("SELECT password_hash FROM users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(db)
+        .await
+}
+
+/// Replace a user's password hash.
+pub async fn set_user_password(db: &SqlitePool, user_id: i64, hash: &str) -> sqlx::Result<()> {
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(hash)
+        .bind(user_id)
+        .execute(db)
+        .await?;
+    Ok(())
+}
+
 /// Ensure a single default user exists (single-user mode) and return its id.
 ///
 /// The password hash is a placeholder until auth lands; this just guarantees an

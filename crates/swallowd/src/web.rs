@@ -63,7 +63,12 @@ fn layout(title: &str, body: Markup) -> Markup {
                 style { (maud::PreEscaped(STYLE)) }
             }
             body {
-                header { a href="/" { "🚛 samoswallow" } }
+                header class="row" {
+                    a href="/" { "🚛 samoswallow" }
+                    form class="inline" method="post" action="/logout" {
+                        button type="submit" { "Выйти" }
+                    }
+                }
                 main { (body) }
             }
         }

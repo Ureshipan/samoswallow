@@ -26,3 +26,6 @@ tar = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 uuid = { version = "1", features = ["v4"] }
 maud = { version = "0.27", features = ["axum"] }
+axum-extra = { version = "0.10", features = ["cookie"] }
+argon2 = "0.5"
+rand = "0.8"

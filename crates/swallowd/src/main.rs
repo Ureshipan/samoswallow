@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod caddy;
 mod config;
 mod db;
@@ -34,6 +35,9 @@ async fn main() -> anyhow::Result<()> {
     let owner_id = models::ensure_default_user(&db)
         .await
         .context("ensuring default user")?;
+    auth::ensure_admin_password(&db, owner_id)
+        .await
+        .context("ensuring admin password")?;
 
     let docker = docker::DockerEngine::connect().context("connecting to Docker")?;
     match docker.ping().await {
@@ -52,9 +56,16 @@ async fn main() -> anyhow::Result<()> {
         config,
         docker,
         caddy,
+        sessions: auth::SessionStore::default(),
         owner_id,
     };
-    let app = web::router(state.clone()).merge(api::router(state));
+    let app = web::router(state.clone())
+        .merge(api::router(state.clone()))
+        .merge(auth::router(state.clone()))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ));
 
     info!("swallowd is listening");
     axum::serve(listener, app)
