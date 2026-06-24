@@ -12,10 +12,20 @@ Rust (axum + tokio + sqlx/SQLite) · Docker (через `bollard`) · Caddy (wil
 
 ## Разработка
 
+Удобнее всего через dev-скрипты (фоновый запуск на `:8088`, свой state в `./.dev`):
+
+```sh
+./scripts/dev-start.sh     # собрать и поднять в фоне
+./scripts/dev-stop.sh      # остановить
+# другой порт:  SWALLOW_LISTEN=127.0.0.1:9000 ./scripts/dev-start.sh
+```
+
+Или вручную:
+
 ```sh
 cargo build
-SWALLOW_LISTEN=127.0.0.1:8080 cargo run -p swallowd
-curl http://127.0.0.1:8080/healthz
+SWALLOW_LISTEN=127.0.0.1:8088 cargo run -p swallowd
+curl http://127.0.0.1:8088/healthz
 ```
 
 Конфигурация через переменные окружения (`SWALLOW_*`), см. `crates/swallowd/src/config.rs`.
