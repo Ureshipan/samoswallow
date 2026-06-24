@@ -8,6 +8,7 @@ mod docker;
 mod error;
 mod hooks;
 mod manifest;
+mod metrics;
 mod models;
 mod web;
 
@@ -47,6 +48,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let caddy = caddy::CaddyClient::new(config.caddy_admin_url.clone());
+
+    // Background sampler: records CPU/memory time-series for running instances.
+    metrics::spawn(db.clone(), docker.clone());
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await

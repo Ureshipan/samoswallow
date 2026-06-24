@@ -102,7 +102,7 @@ struct CreateApp {
 }
 
 fn default_branch() -> String {
-    "master".to_string()
+    "main".to_string()
 }
 
 async fn create_app(

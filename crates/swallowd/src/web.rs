@@ -7,7 +7,7 @@ use serde::Deserialize;
 
 use crate::api::AppState;
 use crate::error::{ApiError, ApiResult};
-use crate::models::{App, Build, Instance};
+use crate::models::{App, Build, Instance, Metric};
 
 /// Server-rendered web UI. Shares `AppState` with the JSON API.
 pub fn router(state: AppState) -> Router {
@@ -20,6 +20,7 @@ pub fn router(state: AppState) -> Router {
         .route("/instances/{id}/restart", post(restart_instance))
         .route("/instances/{id}/stop", post(stop_instance))
         .route("/builds/{id}/rollback", post(rollback_build))
+        .route("/instances/{id}/logs", get(instance_logs_page))
         .with_state(state)
 }
 
@@ -86,22 +87,53 @@ async fn dashboard(State(state): State<AppState>) -> ApiResult<Markup> {
     let apps = App::list(&state.db, state.owner_id).await?;
     let base = state.config.base_domain.clone();
 
+    // Gather a small summary per app: instance counts + a direct link to a
+    // running instance (the newest one), if any.
+    struct Summary {
+        app: App,
+        running: i64,
+        total: i64,
+        open_port: Option<i64>,
+    }
+    let mut summaries = Vec::with_capacity(apps.len());
+    for app in apps {
+        let (running, total) = Instance::counts_for_app(&state.db, app.id).await?;
+        let open_port = Instance::list_running_for_app(&state.db, app.id)
+            .await
+            .ok()
+            .and_then(|v| v.into_iter().next())
+            .and_then(|i| i.host_port);
+        summaries.push(Summary { app, running, total, open_port });
+    }
+
     Ok(layout(
         "dashboard",
         html! {
             div class="row" { h1 { "Приложения" } }
 
-            @if apps.is_empty() {
+            @if summaries.is_empty() {
                 div class="card muted" { "Пока нет приложений. Добавь первое ниже." }
             }
-            @for app in &apps {
+            @for s in &summaries {
                 div class="card" {
                     div class="row" {
                         div {
-                            a href={ "/apps/" (app.id) } { h2 style="margin:0" { (app.name) } }
-                            div class="muted mono" { (app.domain) "." (base) " ← " (app.repo_url) }
+                            a href={ "/apps/" (s.app.id) } { h2 style="margin:0" { (s.app.name) } }
+                            div class="muted mono" { (s.app.domain) "." (base) " ← " (s.app.repo_url) }
+                            div style="margin-top:6px" {
+                                @if s.running > 0 {
+                                    span class="tag running" { "● " (s.running) " запущено" }
+                                } @else {
+                                    span class="tag stopped" { "нет запущенных" }
+                                }
+                                span class="muted" { " · всего инстансов: " (s.total) }
+                                @if let Some(port) = s.open_port {
+                                    " "
+                                    a href={ "http://127.0.0.1:" (port) "/" } target="_blank" { "открыть ↗" }
+                                }
+                            }
                         }
-                        form class="inline" method="post" action={ "/apps/" (app.id) "/deploy" } {
+                        form class="inline" method="post" action={ "/apps/" (s.app.id) "/deploy" } {
                             button class="primary" type="submit" { "Deploy" }
                         }
                     }
@@ -115,7 +147,7 @@ async fn dashboard(State(state): State<AppState>) -> ApiResult<Markup> {
                         div { label { "Имя" } input type="text" name="name" placeholder="my-app" required; }
                         div { label { "Поддомен" } input type="text" name="domain" placeholder="my-app" required; }
                         div { label { "Git репозиторий (URL)" } input type="text" name="repo_url" placeholder="https://github.com/you/my-app" required; }
-                        div { label { "Ветка" } input type="text" name="default_branch" value="master"; }
+                        div { label { "Ветка" } input type="text" name="default_branch" value="main"; }
                     }
                     div style="margin-top:12px" { button class="primary" type="submit" { "Создать" } }
                 }
@@ -138,7 +170,7 @@ async fn create_app(
     Form(form): Form<CreateAppForm>,
 ) -> ApiResult<Redirect> {
     let branch = if form.default_branch.trim().is_empty() {
-        "master"
+        "main"
     } else {
         form.default_branch.trim()
     };
@@ -166,15 +198,25 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
     let instances = Instance::list_for_app(&state.db, id).await?;
     let base = state.config.base_domain.clone();
 
-    // Best-effort live stats for running instances.
+    // Best-effort live stats + recorded history for running instances.
     let mut stats = std::collections::HashMap::new();
+    let mut history = std::collections::HashMap::new();
     for inst in instances.iter().filter(|i| i.status == "running") {
         if let Some(cid) = &inst.container_id {
             if let Ok(s) = state.docker.stats_snapshot(cid).await {
                 stats.insert(inst.id, s);
             }
         }
+        if let Ok(m) = Metric::recent(&state.db, inst.id).await {
+            history.insert(inst.id, m);
+        }
     }
+
+    // A direct, always-working link to the newest running instance.
+    let open_port = instances
+        .iter()
+        .find(|i| i.status == "running")
+        .and_then(|i| i.host_port);
 
     Ok(layout(
         &app.name,
@@ -182,9 +224,17 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
             div class="row" {
                 div {
                     h1 style="margin-bottom:4px" { (app.name) }
-                    div class="muted mono" {
-                        a href={ "http://" (app.domain) "." (base) } { (app.domain) "." (base) }
-                        " ← " (app.repo_url) " (" (app.default_branch) ")"
+                    div class="muted mono" { (app.repo_url) " (" (app.default_branch) ")" }
+                    div style="margin-top:6px" {
+                        @if let Some(port) = open_port {
+                            a href={ "http://127.0.0.1:" (port) "/" } target="_blank" { "открыть ↗ http://127.0.0.1:" (port) }
+                        } @else {
+                            span class="muted" { "нет запущенных инстансов" }
+                        }
+                    }
+                    div class="muted" style="margin-top:4px; font-size:12px" {
+                        "Публичный адрес: " code { (app.domain) "." (base) }
+                        " (работает, когда поднят Caddy и домен указывает на сервер)"
                     }
                 }
                 div {
@@ -219,25 +269,51 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                 } @else {
                     table {
                         thead { tr {
-                            th { "ID" } th { "Статус" } th { "Порт" } th { "CPU" } th { "RAM" }
-                            th { "Создан" } th { "" }
+                            th { "ID" } th { "Статус" } th { "Адрес" } th { "CPU" } th { "RAM" }
+                            th { "" }
                         } }
                         tbody {
                             @for inst in &instances {
+                                @let hist = history.get(&inst.id);
                                 tr {
                                     td { "#" (inst.id) }
                                     td { (status_tag(&inst.status)) }
-                                    td class="mono" { (inst.host_port.map(|p| p.to_string()).unwrap_or_default()) }
-                                    @match stats.get(&inst.id) {
-                                        Some(s) => {
-                                            td class="mono" { (format!("{:.1}%", s.cpu_percent)) }
-                                            td class="mono" { (fmt_bytes(s.memory_bytes)) "/" (fmt_bytes(s.memory_limit_bytes)) }
+                                    td class="mono" {
+                                        @match (inst.status.as_str(), inst.host_port) {
+                                            ("running", Some(port)) => {
+                                                a href={ "http://127.0.0.1:" (port) "/" } target="_blank" { "127.0.0.1:" (port) " ↗" }
+                                            }
+                                            (_, Some(port)) => { span class="muted" { (port) } }
+                                            _ => { span class="muted" { "—" } }
                                         }
-                                        None => { td class="muted" { "—" } td class="muted" { "—" } }
                                     }
-                                    td class="muted" { (inst.created_at) }
                                     td {
+                                        @match stats.get(&inst.id) {
+                                            Some(s) => { div class="mono" { (format!("{:.1}%", s.cpu_percent)) } }
+                                            None => { div class="muted" { "—" } }
+                                        }
+                                        @if let Some(h) = hist {
+                                            @let vals: Vec<f64> = h.iter().map(|m| m.cpu_percent).collect();
+                                            @let mx = vals.iter().cloned().fold(1.0_f64, f64::max);
+                                            (sparkline(&vals, mx, "#6ee787"))
+                                        }
+                                    }
+                                    td {
+                                        @match stats.get(&inst.id) {
+                                            Some(s) => { div class="mono" { (fmt_bytes(s.memory_bytes)) "/" (fmt_bytes(s.memory_limit_bytes)) } }
+                                            None => { div class="muted" { "—" } }
+                                        }
+                                        @if let Some(h) = hist {
+                                            @let vals: Vec<f64> = h.iter().map(|m| m.memory_bytes as f64).collect();
+                                            @let lim = h.last().map(|m| m.memory_limit_bytes as f64).filter(|v| *v > 0.0);
+                                            @let mx = lim.unwrap_or_else(|| vals.iter().cloned().fold(1.0_f64, f64::max));
+                                            (sparkline(&vals, mx, "#6fb3ff"))
+                                        }
+                                    }
+                                    td {
+                                        a href={ "/instances/" (inst.id) "/logs" } { "логи" }
                                         @if inst.status == "running" {
+                                            " "
                                             form class="inline" method="post" action={ "/instances/" (inst.id) "/restart" } {
                                                 button type="submit" { "Restart" }
                                             }
@@ -315,6 +391,38 @@ async fn delete_app(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
     Ok(Redirect::to("/"))
 }
 
+async fn instance_logs_page(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> ApiResult<Markup> {
+    let inst = Instance::get(&state.db, id).await?;
+    let logs = match &inst.container_id {
+        Some(cid) => state
+            .docker
+            .logs(cid, "500")
+            .await
+            .unwrap_or_else(|e| format!("(не удалось получить логи: {e})")),
+        None => "(у инстанса нет контейнера)".to_string(),
+    };
+    let body = if logs.trim().is_empty() {
+        "(пусто — приложение ничего не вывело в stdout/stderr)".to_string()
+    } else {
+        logs
+    };
+
+    Ok(layout(
+        &format!("логи инстанса #{id}"),
+        html! {
+            div class="row" {
+                h1 { "Логи инстанса #" (id) }
+                a href={ "/apps/" (inst.app_id) } { "← к приложению" }
+            }
+            p class="muted" { "Последние 500 строк. Размер логов контейнера ограничен (10 МБ × 3)." }
+            pre { (body) }
+        },
+    ))
+}
+
 async fn rollback_build(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
     let app_id = match Build::get(&state.db, id).await {
         Ok(b) => b.app_id,
@@ -351,6 +459,33 @@ async fn stop_instance(State(state): State<AppState>, Path(id): Path<i64>) -> Ap
     }
     Instance::set_status(&state.db, id, "stopped").await?;
     Ok(Redirect::to(&format!("/apps/{app_id}")))
+}
+
+/// Render a tiny inline SVG sparkline from a series of values, scaled to `max`.
+fn sparkline(values: &[f64], max: f64, color: &str) -> Markup {
+    const W: f64 = 110.0;
+    const H: f64 = 26.0;
+    if values.len() < 2 {
+        return html! { span class="muted" { "—" } };
+    }
+    let max = max.max(1e-9);
+    let n = values.len() as f64;
+    let pts: String = values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let x = (i as f64) / (n - 1.0) * W;
+            let y = H - (v / max).clamp(0.0, 1.0) * H;
+            format!("{x:.1},{y:.1}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let svg = format!(
+        "<svg width=\"{W}\" height=\"{H}\" viewBox=\"0 0 {W} {H}\" preserveAspectRatio=\"none\" \
+         style=\"vertical-align:middle\"><polyline fill=\"none\" stroke=\"{color}\" \
+         stroke-width=\"1.5\" points=\"{pts}\"/></svg>"
+    );
+    html! { (maud::PreEscaped(svg)) }
 }
 
 fn fmt_bytes(b: u64) -> String {

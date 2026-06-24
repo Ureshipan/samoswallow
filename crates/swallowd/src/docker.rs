@@ -105,6 +105,11 @@ impl DockerEngine {
             .map(|(k, v)| format!("{k}={v}"))
             .collect();
 
+        // Cap container logs so they can't fill the disk: 3 rotated 10MB files.
+        let mut log_opts = HashMap::new();
+        log_opts.insert("max-size".to_string(), "10m".to_string());
+        log_opts.insert("max-file".to_string(), "3".to_string());
+
         let host_config = HostConfig {
             port_bindings: Some(bindings),
             memory: parse_memory(manifest.resources.memory.as_deref()),
@@ -112,6 +117,10 @@ impl DockerEngine {
             restart_policy: Some(bollard::models::RestartPolicy {
                 name: Some(bollard::models::RestartPolicyNameEnum::ON_FAILURE),
                 maximum_retry_count: Some(5),
+            }),
+            log_config: Some(bollard::models::HostConfigLogConfig {
+                typ: Some("json-file".to_string()),
+                config: Some(log_opts),
             }),
             ..Default::default()
         };
