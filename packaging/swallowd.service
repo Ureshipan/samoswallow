@@ -1,0 +1,18 @@
+[Unit]
+Description=samoswallow daemon
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/samoswallow/swallowd.env
+ExecStart=/usr/local/bin/swallowd
+Restart=on-failure
+RestartSec=3
+# State lives here (SQLite db, cloned repos, build context).
+StateDirectory=samoswallow
+WorkingDirectory=/var/lib/samoswallow
+
+[Install]
+WantedBy=multi-user.target
