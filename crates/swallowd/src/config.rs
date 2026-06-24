@@ -12,6 +12,10 @@ pub struct Config {
     pub database_url: String,
     /// Base domain; app `domain: foo` is served at `foo.<base_domain>`.
     pub base_domain: String,
+    /// Directory for working state (cloned repos, build contexts).
+    pub state_dir: std::path::PathBuf,
+    /// Caddy Admin API base URL.
+    pub caddy_admin_url: String,
 }
 
 impl Config {
@@ -26,10 +30,19 @@ impl Config {
         let base_domain =
             std::env::var("SWALLOW_BASE_DOMAIN").unwrap_or_else(|_| "localhost".to_string());
 
+        let state_dir = std::env::var("SWALLOW_STATE_DIR")
+            .unwrap_or_else(|_| "./state".to_string())
+            .into();
+
+        let caddy_admin_url = std::env::var("SWALLOW_CADDY_ADMIN")
+            .unwrap_or_else(|_| "http://127.0.0.1:2019".to_string());
+
         Ok(Self {
             listen_addr,
             database_url,
             base_domain,
+            state_dir,
+            caddy_admin_url,
         })
     }
 }

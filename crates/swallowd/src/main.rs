@@ -1,9 +1,15 @@
 mod api;
+mod caddy;
 mod config;
 mod db;
+mod deploy;
+mod docker;
+mod error;
+mod manifest;
+mod models;
 
 use anyhow::Context;
-use tracing::info;
+use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use crate::api::AppState;
@@ -24,11 +30,29 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connecting to database")?;
 
+    let owner_id = models::ensure_default_user(&db)
+        .await
+        .context("ensuring default user")?;
+
+    let docker = docker::DockerEngine::connect().context("connecting to Docker")?;
+    match docker.ping().await {
+        Ok(v) => info!(docker_version = %v, "connected to Docker"),
+        Err(e) => warn!(error = %e, "Docker not reachable yet — deploys will fail until it is"),
+    }
+
+    let caddy = caddy::CaddyClient::new(config.caddy_admin_url.clone());
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .with_context(|| format!("binding {}", config.listen_addr))?;
 
-    let state = AppState { db, config };
+    let state = AppState {
+        db,
+        config,
+        docker,
+        caddy,
+        owner_id,
+    };
     let app = api::router(state);
 
     info!("swallowd is listening");
