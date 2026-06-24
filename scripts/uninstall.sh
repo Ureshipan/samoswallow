@@ -24,12 +24,14 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-if systemctl list-unit-files | grep -q '^swallowd.service'; then
-    log "stopping and disabling service"
-    systemctl disable --now swallowd || true
-    rm -f "$SERVICE"
-    systemctl daemon-reload
-fi
+for unit in swallowd swallow-caddy; do
+    if systemctl list-unit-files | grep -q "^$unit.service"; then
+        log "stopping and disabling $unit"
+        systemctl disable --now "$unit" || true
+        rm -f "/etc/systemd/system/$unit.service"
+    fi
+done
+systemctl daemon-reload
 
 log "removing binary"
 rm -f "$PREFIX/swallowd"

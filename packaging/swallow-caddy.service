@@ -1,0 +1,21 @@
+[Unit]
+Description=Caddy reverse proxy for samoswallow
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# --resume reloads the last config samoswallow pushed via the Admin API, so
+# routes survive restarts. Autosave/data is kept under the state dir.
+Environment=XDG_DATA_HOME=/var/lib/samoswallow/caddy-data
+Environment=XDG_CONFIG_HOME=/var/lib/samoswallow/caddy-config
+ExecStartPre=/bin/mkdir -p /var/lib/samoswallow/caddy-data /var/lib/samoswallow/caddy-config
+ExecStart=/usr/local/bin/caddy run --resume
+ExecReload=/usr/local/bin/caddy reload --force
+Restart=on-failure
+RestartSec=3
+# Allow binding 80/443 without running as full root if hardened later.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

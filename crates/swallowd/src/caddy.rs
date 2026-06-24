@@ -33,7 +33,10 @@ impl CaddyClient {
             }
         }
 
-        // Bootstrap the whole http app config.
+        // When Caddy has no config yet its `/config` tree is `null`, so we can't
+        // POST/PUT into a sub-path that doesn't exist. The canonical way to set a
+        // whole config from scratch is `POST /load`. samoswallow owns this Caddy
+        // instance, so replacing the root is fine.
         let config = json!({
             "apps": {
                 "http": {
@@ -48,8 +51,8 @@ impl CaddyClient {
         });
         let resp = self
             .http
-            .post(format!("{}/config/apps/", self.admin_url))
-            .json(&config["apps"])
+            .post(format!("{}/load", self.admin_url))
+            .json(&config)
             .send()
             .await
             .context("bootstrapping caddy config")?;
