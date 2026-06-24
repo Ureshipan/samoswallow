@@ -16,6 +16,7 @@ pub fn router(state: AppState) -> Router {
         .route("/apps", post(create_app))
         .route("/apps/{id}", get(app_detail))
         .route("/apps/{id}/deploy", post(deploy_app))
+        .route("/apps/{id}/settings", post(update_app_settings))
         .route("/apps/{id}/delete", post(delete_app))
         .route("/instances/{id}/restart", post(restart_instance))
         .route("/instances/{id}/stop", post(stop_instance))
@@ -264,6 +265,12 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                         "Публичный адрес: " code { (app.domain) "." (base) }
                         " (работает, когда поднят Caddy и домен указывает на сервер)"
                     }
+                    @if let Some(port) = app.external_port {
+                        div class="muted" style="margin-top:4px; font-size:12px" {
+                            "Внешний порт: " code { "0.0.0.0:" (port) }
+                            " (прямой доступ снаружи, помимо Caddy)"
+                        }
+                    }
                 }
                 div {
                     form class="inline" method="post" action={ "/apps/" (app.id) "/deploy" } {
@@ -287,6 +294,27 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                     tr { th { "Payload URL" } td class="mono" { "http://<хост-самосвала>/hooks/" (app.id) } }
                     tr { th { "Content type" } td class="mono" { "application/json" } }
                     tr { th { "Secret" } td class="mono" { (app.webhook_secret.clone().unwrap_or_default()) } }
+                }
+            }
+
+            div class="card" {
+                h2 { "Настройки" }
+                form method="post" action={ "/apps/" (app.id) "/settings" } {
+                    label for="external_port" { "Внешний порт" }
+                    div class="row" style="justify-content:flex-start; gap:10px" {
+                        input type="text" inputmode="numeric" name="external_port"
+                            id="external_port" placeholder="напр. 8081"
+                            value=(app.external_port.map(|p| p.to_string()).unwrap_or_default())
+                            style="max-width:160px";
+                        button class="primary" type="submit" { "Сохранить" }
+                    }
+                    p class="muted" style="margin-top:8px" {
+                        "Если задан, инстансы публикуются напрямую на "
+                        code { "0.0.0.0:<порт>" }
+                        " и доступны снаружи (помимо поддомена Caddy). "
+                        "При деплое старый инстанс гасится до запуска нового — короткий простой. "
+                        "Пусто — случайный порт на " code { "127.0.0.1" } ", только через Caddy."
+                    }
                 }
             }
 
@@ -404,6 +432,31 @@ async fn deploy_app(State(state): State<AppState>, Path(id): Path<i64>) -> Respo
         Ok(_) => Redirect::to(&format!("/apps/{id}")).into_response(),
         Err(e) => ApiError::Internal(e).into_response(),
     }
+}
+
+#[derive(Deserialize)]
+struct SettingsForm {
+    #[serde(default)]
+    external_port: String,
+}
+
+async fn update_app_settings(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Form(form): Form<SettingsForm>,
+) -> ApiResult<Redirect> {
+    App::get(&state.db, id).await?;
+    // Empty field clears the port; otherwise it must parse as a number.
+    let port = match form.external_port.trim() {
+        "" => None,
+        s => Some(
+            s.parse::<i64>()
+                .map_err(|_| ApiError::BadRequest("external port must be a number".into()))?,
+        ),
+    };
+    let port = crate::api::validate_external_port(port)?;
+    App::set_external_port(&state.db, id, port).await?;
+    Ok(Redirect::to(&format!("/apps/{id}")))
 }
 
 async fn delete_app(State(state): State<AppState>, Path(id): Path<i64>) -> ApiResult<Redirect> {

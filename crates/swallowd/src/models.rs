@@ -22,6 +22,10 @@ pub struct App {
     pub manifest: Option<String>,
     /// Secret used to verify incoming push webhooks (HMAC-SHA256).
     pub webhook_secret: Option<String>,
+    /// Fixed host port to publish instances on (bound to 0.0.0.0). When `None`,
+    /// a random localhost port is assigned per instance and traffic only flows
+    /// through Caddy.
+    pub external_port: Option<i64>,
     pub created_at: String,
 }
 
@@ -29,7 +33,7 @@ impl App {
     pub async fn list(db: &SqlitePool, owner_id: i64) -> sqlx::Result<Vec<App>> {
         sqlx::query_as::<_, App>(
             "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
-             webhook_secret, created_at \
+             webhook_secret, external_port, created_at \
              FROM apps WHERE owner_id = ? ORDER BY created_at DESC, id DESC",
         )
         .bind(owner_id)
@@ -40,7 +44,7 @@ impl App {
     pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<App> {
         sqlx::query_as::<_, App>(
             "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
-             webhook_secret, created_at \
+             webhook_secret, external_port, created_at \
              FROM apps WHERE id = ?",
         )
         .bind(id)
@@ -81,6 +85,20 @@ impl App {
             .await?
             .rows_affected();
         Ok(affected > 0)
+    }
+
+    /// Set (or clear, with `None`) the fixed external port for an app.
+    pub async fn set_external_port(
+        db: &SqlitePool,
+        id: i64,
+        port: Option<i64>,
+    ) -> sqlx::Result<()> {
+        sqlx::query("UPDATE apps SET external_port = ? WHERE id = ?")
+            .bind(port)
+            .bind(id)
+            .execute(db)
+            .await?;
+        Ok(())
     }
 }
 

@@ -126,7 +126,19 @@ impl Deployer {
         build_id: i64,
         image_tag: &str,
     ) -> Result<(i64, String, u16)> {
-        let host_port = pick_free_port().context("allocating host port")?;
+        // A fixed external port can only be held by one container at a time, so
+        // the old instance must be retired before the new one can bind it (this
+        // costs a short downtime window). A random localhost port lets the new
+        // instance start alongside the old one (blue-green) and retire it after.
+        let external = app.external_port.is_some();
+        let host_port = match app.external_port {
+            Some(p) => {
+                self.retire_old_instances(app.id, -1).await;
+                u16::try_from(p).map_err(|_| anyhow::anyhow!("external_port {p} out of range"))?
+            }
+            None => pick_free_port().context("allocating host port")?,
+        };
+
         let container_name = format!(
             "sw-{}-{}",
             sanitize(&app.name),
@@ -134,7 +146,7 @@ impl Deployer {
         );
         let running = self
             .docker
-            .run_container(image_tag, &container_name, manifest, host_port)
+            .run_container(image_tag, &container_name, manifest, host_port, external)
             .await
             .context("running container")?;
         let instance_id = Instance::create(
@@ -145,7 +157,7 @@ impl Deployer {
             running.host_port as i64,
         )
         .await?;
-        info!(app = %app.name, instance_id, host_port, "instance started");
+        info!(app = %app.name, instance_id, host_port, external, "instance started");
 
         // Point Caddy at the new instance (best-effort in dev).
         let host = format!("{}.{}", app.domain, self.config.base_domain);
@@ -154,7 +166,11 @@ impl Deployer {
             warn!(app = %app.name, error = %e, "could not update Caddy route (is Caddy running?)");
         }
 
-        self.retire_old_instances(app.id, instance_id).await;
+        // For a random port, the new instance is already serving — retire the
+        // rest now. For a fixed port the old one was retired up front.
+        if !external {
+            self.retire_old_instances(app.id, instance_id).await;
+        }
         Ok((instance_id, host, host_port))
     }
 
