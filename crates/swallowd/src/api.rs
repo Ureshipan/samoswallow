@@ -39,6 +39,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/api/version", get(version))
+        .route("/api/caddy/status", get(caddy_status))
         .route("/api/apps", get(list_apps).post(create_app))
         .route("/api/apps/{id}", get(get_app).delete(delete_app))
         .route("/api/apps/{id}/deploy", post(deploy_app))
@@ -79,6 +80,17 @@ async fn version(State(state): State<AppState>) -> Json<Version> {
         name: env!("CARGO_PKG_NAME"),
         version: env!("CARGO_PKG_VERSION"),
         base_domain: state.config.base_domain.clone(),
+    })
+}
+
+#[derive(Serialize)]
+struct CaddyStatus {
+    online: bool,
+}
+
+async fn caddy_status(State(state): State<AppState>) -> Json<CaddyStatus> {
+    Json(CaddyStatus {
+        online: state.caddy.is_online().await,
     })
 }
 

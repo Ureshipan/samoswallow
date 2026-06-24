@@ -92,8 +92,9 @@ log "installing systemd units"
 cp packaging/swallowd.service "$SERVICE"
 cp packaging/swallow-caddy.service /etc/systemd/system/swallow-caddy.service
 systemctl daemon-reload
-systemctl enable --now swallow-caddy
-systemctl enable --now swallowd
+systemctl enable swallow-caddy swallowd
+systemctl start swallow-caddy          # start if not already running
+systemctl restart swallowd             # restart to pick up a new binary on upgrades
 
 log "done. Check status with:  systemctl status swallowd"
 log "API:  curl http://127.0.0.1:8080/healthz"

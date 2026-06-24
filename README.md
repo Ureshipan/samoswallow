@@ -30,32 +30,106 @@ curl http://127.0.0.1:8088/healthz
 
 Конфигурация через переменные окружения (`SWALLOW_*`), см. `crates/swallowd/src/config.rs`.
 
-## Установка на сервер
+## Развёртывание на сервере
 
 ```sh
-cargo build --release
-sudo ./scripts/install.sh            # ставит бинарь, systemd-юнит, конфиг
-sudo ./scripts/uninstall.sh --purge  # полное удаление вместе с данными
+cargo build --release                # бинарь -> target/release/swallowd
+sudo ./scripts/install.sh            # ставит бинарь, systemd-юниты, Caddy, конфиг
 ```
 
-После запуска открой `http://127.0.0.1:8080/` — там веб-интерфейс: добавление
-приложений, деплой, мониторинг инстансов (CPU/RAM), restart/stop, логи сборок.
+`install.sh` делает: кладёт бинарь в `/usr/local/bin/swallowd`, ставит и
+запускает Docker (если нет) и Caddy, создаёт конфиг `/etc/samoswallow/swallowd.env`
+и каталог состояния `/var/lib/samoswallow`, регистрирует и запускает systemd-юниты
+`swallowd` и `swallow-caddy`.
 
-Интерфейс закрыт логином (пользователь `admin`). Пароль задаётся через
-`SWALLOW_ADMIN_PASSWORD`; если не задан — генерируется случайный и печатается в
-лог при первом запуске.
+После установки интерфейс доступен по адресу из `SWALLOW_LISTEN` (по умолчанию
+`http://127.0.0.1:8080/`). Логин — пользователь `admin`.
+
+### Где задавать пароль, порт и прочие переменные
+
+Все настройки — это переменные окружения в файле **`/etc/samoswallow/swallowd.env`**
+(его создаёт `install.sh`). После правки файла перезапусти сервис:
+
+```sh
+sudo nano /etc/samoswallow/swallowd.env
+sudo systemctl restart swallowd
+```
+
+| Переменная               | Назначение                                        | По умолчанию                         |
+|--------------------------|---------------------------------------------------|--------------------------------------|
+| `SWALLOW_LISTEN`         | адрес и **порт** веб-интерфейса/API               | `127.0.0.1:8080`                     |
+| `SWALLOW_ADMIN_PASSWORD` | **пароль** пользователя `admin`                   | если пусто — генерируется в лог      |
+| `SWALLOW_BASE_DOMAIN`    | базовый домен; `app` отдаётся на `app.<домен>`    | `localhost`                          |
+| `SWALLOW_DATABASE_URL`   | путь к SQLite-базе                                 | `sqlite:///var/lib/samoswallow/state.db` |
+| `SWALLOW_STATE_DIR`      | каталог рабочих данных (клоны репо, сборки)        | `/var/lib/samoswallow`               |
+| `SWALLOW_CADDY_ADMIN`    | URL Admin API Caddy                               | `http://127.0.0.1:2019`              |
+| `SWALLOW_LOG`            | уровень логов (`info`, `debug`, …)                | `info`                               |
+
+> Если `SWALLOW_LISTEN` смотрит наружу (`0.0.0.0:…`), обязательно задай
+> `SWALLOW_ADMIN_PASSWORD` — иначе морда будет открыта в сеть с авто-паролем
+> только из логов. Рекомендуется держать `SWALLOW_LISTEN=127.0.0.1:…` и
+> публиковать интерфейс через Caddy.
+
+### Управление сервисом
+
+samoswallow и его reverse-proxy — два systemd-юнита: `swallowd` и `swallow-caddy`.
+
+```sh
+sudo systemctl status swallowd          # состояние демона
+sudo systemctl restart swallowd         # перезапуск (после правки конфига)
+sudo systemctl stop swallowd            # остановить
+journalctl -u swallowd -e -f            # логи демона (живой хвост)
+
+sudo systemctl status swallow-caddy     # состояние Caddy
+journalctl -u swallow-caddy -e          # логи Caddy
+```
+
+Статус Caddy также виден прямо в интерфейсе — бейдж «Caddy: онлайн/офлайн»
+в шапке. Проверить вручную: `curl -s http://127.0.0.1:2019/config/` (ответ =
+Caddy жив).
+
+### Обновление до новой версии
+
+Когда обновился код самосвала:
+
+```sh
+cd /path/to/samoswallow
+git pull
+cargo build --release
+sudo ./scripts/install.sh        # перекладывает бинарь + юниты и перезапускает
+```
+
+`install.sh` идемпотентен: существующий `swallowd.env` и база в
+`/var/lib/samoswallow` не трогаются, обновляется только бинарь и юниты, сервисы
+перезапускаются. Если нужно вручную — достаточно заменить бинарь и перезапустить:
+
+```sh
+sudo install -m755 target/release/swallowd /usr/local/bin/swallowd
+sudo systemctl restart swallowd
+```
+
+При изменении схемы БД миграции применяются автоматически при старте.
+
+### Удаление
+
+```sh
+sudo ./scripts/uninstall.sh           # снести бинарь, юниты, конфиг (данные сохранить)
+sudo ./scripts/uninstall.sh --purge   # + удалить состояние /var/lib/samoswallow
+```
 
 ## Статус
 
-**Фаза 1 (MVP) — готова.** Работает:
+**Фаза 1 (MVP) — готова.** **Фаза 2 — в работе.** Работает:
 
-- HTTP JSON API + серверный веб-интерфейс (maud SSR).
+- HTTP JSON API + серверный веб-интерфейс (maud SSR), аутентификация (argon2).
 - Деплой из git: clone → сборка образа (Docker/bollard) → запуск инстанса →
   роут поддомена через Caddy → ротация старых инстансов.
-- Управление инстансами: restart / stop, снапшоты нагрузки (CPU/RAM), логи.
-- Аутентификация (пароль + сессия, argon2) — весь UI и API за логином.
-- SQLite-состояние с миграциями.
-- Установка/удаление одним скриптом, с авто-установкой Caddy и systemd-юнитами.
+- Автодеплой по webhook'ам (push в ветку, проверка HMAC-подписи).
+- Откаты на прошлый билд без пересборки.
+- Управление инстансами: restart / stop, прямые ссылки, логи в UI.
+- Метрики во времени: графики CPU/RAM (фоновый сэмплер + retention).
+- Бейдж статуса Caddy в интерфейсе.
+- SQLite-состояние с миграциями; установка/удаление/обновление скриптами.
 
-Следующая, Фаза 2: автодеплой по webhook'ам, несколько инстансов с
-балансировкой, метрики во времени, откаты на прошлый билд. См. `CONCEPT.md`.
+Осталось по Фазе 2: несколько инстансов на приложение + балансировка. См.
+`CONCEPT.md`.

@@ -52,6 +52,30 @@ label { display: block; font-size: 13px; color: #9aa3af; margin-bottom: 4px; }
 .muted { color: #9aa3af; font-size: 13px; }
 .mono { font-family: ui-monospace, monospace; font-size: 12px; }
 pre { background: #0f1115; border: 1px solid #2a2e36; border-radius: 8px; padding: 12px; overflow: auto; max-height: 360px; font-size: 12px; }
+.badge { font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid #3a3f49; color: #9aa3af; }
+.badge.online { background: #163b22; color: #6ee787; border-color: #245a35; }
+.badge.offline { background: #3b1616; color: #ff8b8b; border-color: #5a2a2a; }
+"#;
+
+/// Polls the Caddy status endpoint and updates the header badge.
+const CADDY_BADGE_JS: &str = r#"
+(function () {
+  const el = document.getElementById('caddy-badge');
+  if (!el) return;
+  async function tick() {
+    try {
+      const r = await fetch('/api/caddy/status');
+      const d = await r.json();
+      el.textContent = 'Caddy: ' + (d.online ? 'онлайн' : 'офлайн');
+      el.className = 'badge ' + (d.online ? 'online' : 'offline');
+    } catch (e) {
+      el.textContent = 'Caddy: ?';
+      el.className = 'badge';
+    }
+  }
+  tick();
+  setInterval(tick, 10000);
+})();
 "#;
 
 fn layout(title: &str, body: Markup) -> Markup {
@@ -67,11 +91,15 @@ fn layout(title: &str, body: Markup) -> Markup {
             body {
                 header class="row" {
                     a href="/" { "🚛 samoswallow" }
-                    form class="inline" method="post" action="/logout" {
-                        button type="submit" { "Выйти" }
+                    div class="row" style="gap:12px" {
+                        span id="caddy-badge" class="badge" title="Статус reverse-proxy Caddy" { "Caddy: …" }
+                        form class="inline" method="post" action="/logout" {
+                            button type="submit" { "Выйти" }
+                        }
                     }
                 }
                 main { (body) }
+                script { (maud::PreEscaped(CADDY_BADGE_JS)) }
             }
         }
     }
