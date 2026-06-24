@@ -10,8 +10,10 @@ Type=notify
 Environment=XDG_DATA_HOME=/var/lib/samoswallow/caddy-data
 Environment=XDG_CONFIG_HOME=/var/lib/samoswallow/caddy-config
 ExecStartPre=/bin/mkdir -p /var/lib/samoswallow/caddy-data /var/lib/samoswallow/caddy-config
-ExecStart=/usr/local/bin/caddy run --resume
-ExecReload=/usr/local/bin/caddy reload --force
+# Resolve caddy via PATH so it works whether installed to /usr/bin (package
+# manager) or /usr/local/bin (static download).
+ExecStart=/usr/bin/env caddy run --resume
+ExecReload=/usr/bin/env caddy reload --force
 Restart=on-failure
 RestartSec=3
 # Allow binding 80/443 without running as full root if hardened later.
