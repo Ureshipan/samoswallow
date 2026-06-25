@@ -53,12 +53,18 @@ impl CaddyClient {
         // POST/PUT into a sub-path that doesn't exist. The canonical way to set a
         // whole config from scratch is `POST /load`. samoswallow owns this Caddy
         // instance, so replacing the root is fine.
+        // Pin protocols to HTTP/1.1 + HTTP/2 (no HTTP/3). HTTP/3 adds a UDP :443
+        // QUIC listener that Caddy fails to rebind on graceful config reloads
+        // ("listen udp :443: bind: address already in use"), which made every
+        // route upsert after the first 500. TCP listeners reuse cleanly, so
+        // dropping h3 keeps route changes hot-reloadable.
         let config = json!({
             "apps": {
                 "http": {
                     "servers": {
                         "srv0": {
                             "listen": [":80", ":443"],
+                            "protocols": ["h1", "h2"],
                             "routes": []
                         }
                     }
@@ -72,10 +78,11 @@ impl CaddyClient {
             .send()
             .await
             .context("bootstrapping caddy config")?;
+        let status = resp.status();
         anyhow::ensure!(
-            resp.status().is_success(),
-            "caddy bootstrap failed: {}",
-            resp.status()
+            status.is_success(),
+            "caddy bootstrap failed: {status}: {}",
+            resp.text().await.unwrap_or_default()
         );
         Ok(())
     }
@@ -113,10 +120,11 @@ impl CaddyClient {
             .send()
             .await
             .context("posting caddy route")?;
+        let status = resp.status();
         anyhow::ensure!(
-            resp.status().is_success(),
-            "caddy route upsert failed: {}",
-            resp.status()
+            status.is_success(),
+            "caddy route upsert failed: {status}: {}",
+            resp.text().await.unwrap_or_default()
         );
         Ok(())
     }
