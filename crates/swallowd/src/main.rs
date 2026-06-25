@@ -48,6 +48,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let caddy = caddy::CaddyClient::new(config.caddy_admin_url.clone());
+    // Make sure Caddy has the base :80/:443 server up front so the first request
+    // to an app's subdomain works even before the first deploy. Best-effort:
+    // Caddy may not be running yet, and deploys re-run this anyway.
+    match caddy.ensure_bootstrap().await {
+        Ok(()) => info!("caddy base server ready"),
+        Err(e) => warn!(error = %e, "could not bootstrap Caddy (is it running?)"),
+    }
 
     // Background sampler: records CPU/memory time-series for running instances.
     metrics::spawn(db.clone(), docker.clone());

@@ -38,13 +38,25 @@ impl CaddyClient {
     }
 
     /// Ensure the base HTTP server exists (idempotent). Creates an empty
-    /// `srv0` listening on :80 and :443 with an `@id`'d routes array.
-    async fn ensure_bootstrap(&self) -> Result<()> {
+    /// `srv0` listening on :80 and :443 with an `@id`'d routes array. Safe to
+    /// call on startup and before every route upsert.
+    pub async fn ensure_bootstrap(&self) -> Result<()> {
         let url = format!("{}/config/apps/http/servers/srv0", self.admin_url);
         let existing = self.http.get(&url).send().await?;
         if existing.status().is_success() {
             let body = existing.text().await.unwrap_or_default();
             if body.trim() != "null" && !body.trim().is_empty() {
+                // srv0 already exists (e.g. Caddy resumed prior routes). Don't
+                // POST /load — that replaces the whole config and would drop the
+                // live routes. Just reconcile the protocol set so the h3 fix
+                // self-heals across upgrades/restarts (PUT touches only this
+                // field, leaving routes intact).
+                let _ = self
+                    .http
+                    .put(format!("{url}/protocols"))
+                    .json(&json!(["h1", "h2"]))
+                    .send()
+                    .await;
                 return Ok(());
             }
         }

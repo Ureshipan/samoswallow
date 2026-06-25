@@ -63,6 +63,27 @@ if systemctl list-unit-files 2>/dev/null | grep -q '^caddy.service'; then
     systemctl disable --now caddy 2>/dev/null || true
 fi
 
+# Warn if something else already holds 80/443. Our Caddy needs both; another
+# listener (nginx, apache, a stray caddy) makes Caddy's config load fail with
+# "address already in use" and routes silently never apply.
+check_port_free() {
+    port="$1"
+    holder="$(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oE 'users:\(\("[^"]+' | head -n1 | sed 's/.*"//')"
+    if [ -n "$holder" ] && [ "$holder" != "caddy" ]; then
+        err "port $port is already in use by '$holder' — Caddy needs it for app routing."
+        err "stop/disable that service (e.g. 'systemctl disable --now $holder') and re-run, or"
+        err "put Caddy behind it on internal ports. Until then app subdomains won't work."
+        return 1
+    fi
+    return 0
+}
+ports_ok=0
+check_port_free 80 || ports_ok=1
+check_port_free 443 || ports_ok=1
+if [ "$ports_ok" -ne 0 ]; then
+    err "continuing install, but fix the port conflict above for routing to work."
+fi
+
 # --- binary ----------------------------------------------------------------
 if [ ! -f "$BIN_SRC" ]; then
     err "binary not found at '$BIN_SRC'"
