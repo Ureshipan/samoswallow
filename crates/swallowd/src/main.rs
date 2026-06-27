@@ -56,6 +56,20 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => warn!(error = %e, "could not bootstrap Caddy (is it running?)"),
     }
 
+    // Bring deployed apps back after a host reboot: restart surviving
+    // containers, clean up vanished ones, and re-apply Caddy routes (Caddy comes
+    // up with an empty config). Best-effort — the daemon serves regardless.
+    let reconciler = deploy::Deployer {
+        db: db.clone(),
+        docker: docker.clone(),
+        caddy: caddy.clone(),
+        config: config.clone(),
+    };
+    match reconciler.reconcile().await {
+        Ok(()) => info!("reconciled instances and routes after startup"),
+        Err(e) => warn!(error = %e, "startup reconciliation failed"),
+    }
+
     // Background sampler: records CPU/memory time-series for running instances.
     metrics::spawn(db.clone(), docker.clone());
 

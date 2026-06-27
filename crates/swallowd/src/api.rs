@@ -112,6 +112,12 @@ struct CreateApp {
     #[serde(default = "default_branch")]
     default_branch: String,
     domain: String,
+    /// Optional host directory to bind-mount for persistent data.
+    #[serde(default)]
+    data_dir: Option<String>,
+    /// Where the data directory appears inside the container (default `/data`).
+    #[serde(default)]
+    mount_path: Option<String>,
 }
 
 fn default_branch() -> String {
@@ -131,6 +137,8 @@ async fn create_app(
     if body.domain.trim().is_empty() {
         return Err(ApiError::BadRequest("domain is required".into()));
     }
+    let (data_dir, mount_path) =
+        validate_data_mount(body.data_dir.as_deref(), body.mount_path.as_deref())?;
 
     let app = App::create(
         &state.db,
@@ -139,6 +147,8 @@ async fn create_app(
         body.repo_url.trim(),
         body.default_branch.trim(),
         body.domain.trim(),
+        data_dir.as_deref(),
+        mount_path.as_deref(),
     )
     .await?;
     Ok((StatusCode::CREATED, Json(app)))
@@ -148,6 +158,12 @@ async fn create_app(
 struct UpdateSettings {
     /// Fixed host port to publish instances on; `null` clears it (Caddy-only).
     external_port: Option<i64>,
+    /// Host directory for persistent data; `null`/empty clears it.
+    #[serde(default)]
+    data_dir: Option<String>,
+    /// Container mount path for the data directory (default `/data`).
+    #[serde(default)]
+    mount_path: Option<String>,
 }
 
 async fn update_app_settings(
@@ -157,8 +173,40 @@ async fn update_app_settings(
 ) -> ApiResult<Json<App>> {
     App::get(&state.db, id).await?;
     let port = validate_external_port(body.external_port)?;
+    let (data_dir, mount_path) =
+        validate_data_mount(body.data_dir.as_deref(), body.mount_path.as_deref())?;
     App::set_external_port(&state.db, id, port).await?;
+    App::set_data_mount(&state.db, id, data_dir.as_deref(), mount_path.as_deref()).await?;
     Ok(Json(App::get(&state.db, id).await?))
+}
+
+/// Validate the persistent-data mount inputs. Returns the normalized
+/// `(data_dir, mount_path)` to store: both `None` when no host path is given, an
+/// absolute host path otherwise, and a `mount_path` only when a host path is set.
+pub(crate) fn validate_data_mount(
+    data_dir: Option<&str>,
+    mount_path: Option<&str>,
+) -> Result<(Option<String>, Option<String>), ApiError> {
+    let host = data_dir.map(str::trim).filter(|s| !s.is_empty());
+    let target = mount_path.map(str::trim).filter(|s| !s.is_empty());
+
+    let Some(host) = host else {
+        // No host directory => clear the mount entirely (target is meaningless).
+        return Ok((None, None));
+    };
+    if !std::path::Path::new(host).is_absolute() {
+        return Err(ApiError::BadRequest(format!(
+            "data directory must be an absolute path, got '{host}'"
+        )));
+    }
+    if let Some(t) = target {
+        if !std::path::Path::new(t).is_absolute() {
+            return Err(ApiError::BadRequest(format!(
+                "container mount path must be absolute, got '{t}'"
+            )));
+        }
+    }
+    Ok((Some(host.to_string()), target.map(str::to_string)))
 }
 
 /// Validate a user-supplied external port: must be in 1..=65535, or `None` to
@@ -320,5 +368,31 @@ mod tests {
         assert!(validate_external_port(Some(0)).is_err());
         assert!(validate_external_port(Some(65536)).is_err());
         assert!(validate_external_port(Some(-1)).is_err());
+    }
+
+    #[test]
+    fn data_mount_validation() {
+        // Nothing set => fully cleared.
+        assert_eq!(validate_data_mount(None, None).unwrap(), (None, None));
+        assert_eq!(
+            validate_data_mount(Some("  "), Some("/data")).unwrap(),
+            (None, None)
+        );
+        // Absolute host path, default container path.
+        assert_eq!(
+            validate_data_mount(Some("/srv/app-data"), None).unwrap(),
+            (Some("/srv/app-data".to_string()), None)
+        );
+        // Both absolute.
+        assert_eq!(
+            validate_data_mount(Some("/srv/app-data"), Some("/var/lib/app")).unwrap(),
+            (
+                Some("/srv/app-data".to_string()),
+                Some("/var/lib/app".to_string())
+            )
+        );
+        // Relative paths are rejected.
+        assert!(validate_data_mount(Some("relative/dir"), None).is_err());
+        assert!(validate_data_mount(Some("/ok"), Some("rel")).is_err());
     }
 }
