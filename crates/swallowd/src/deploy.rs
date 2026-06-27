@@ -7,7 +7,7 @@ use tracing::{info, warn};
 
 use crate::caddy::CaddyClient;
 use crate::config::Config;
-use crate::docker::DockerEngine;
+use crate::docker::{ContainerStatus, DockerEngine};
 use crate::manifest::Manifest;
 use crate::models::{set_app_manifest, App, Build, Instance};
 
@@ -146,7 +146,14 @@ impl Deployer {
         );
         let running = self
             .docker
-            .run_container(image_tag, &container_name, manifest, host_port, external)
+            .run_container(
+                image_tag,
+                &container_name,
+                manifest,
+                host_port,
+                external,
+                app.data_mount(),
+            )
             .await
             .context("running container")?;
         let instance_id = Instance::create(
@@ -172,6 +179,63 @@ impl Deployer {
             self.retire_old_instances(app.id, instance_id).await;
         }
         Ok((instance_id, host, host_port))
+    }
+
+    /// Reconcile persisted state with reality at startup.
+    ///
+    /// After a host reboot the Docker daemon comes back but our routing and DB
+    /// can be out of sync: containers may need (re)starting, some may be gone
+    /// entirely while the DB still marks them `running`, and Caddy starts with
+    /// an empty config so every route must be re-applied. For each app we bring
+    /// surviving containers back up, mark vanished ones `stopped`, then point
+    /// Caddy at whatever ended up running. Best-effort: failures are logged, not
+    /// fatal, so the daemon still serves its UI.
+    pub async fn reconcile(&self) -> Result<()> {
+        let apps = App::list_all(&self.db).await.context("listing apps")?;
+        for app in apps {
+            let instances = Instance::list_running_for_app(&self.db, app.id)
+                .await
+                .context("listing running instances")?;
+
+            let mut live_ports = Vec::new();
+            for inst in instances {
+                let Some(cid) = inst.container_id.clone() else {
+                    let _ = Instance::set_status(&self.db, inst.id, "stopped").await;
+                    continue;
+                };
+                match self.docker.ensure_running(&cid).await {
+                    Ok(ContainerStatus::Running) => {
+                        if let Some(p) = inst.host_port {
+                            live_ports.push(p);
+                        }
+                    }
+                    Ok(ContainerStatus::Started) => {
+                        info!(app = %app.name, instance = inst.id, "restarted instance after reboot");
+                        if let Some(p) = inst.host_port {
+                            live_ports.push(p);
+                        }
+                    }
+                    Ok(ContainerStatus::Missing) => {
+                        warn!(app = %app.name, instance = inst.id, "container gone, marking instance stopped");
+                        let _ = Instance::set_status(&self.db, inst.id, "stopped").await;
+                    }
+                    Err(e) => {
+                        warn!(app = %app.name, instance = inst.id, error = %e, "could not reconcile instance");
+                    }
+                }
+            }
+
+            if live_ports.is_empty() {
+                continue;
+            }
+            let host = format!("{}.{}", app.domain, self.config.base_domain);
+            let upstreams: Vec<String> =
+                live_ports.iter().map(|p| format!("127.0.0.1:{p}")).collect();
+            if let Err(e) = self.caddy.sync_app_route(app.id, &host, &upstreams).await {
+                warn!(app = %app.name, error = %e, "could not re-apply Caddy route on startup");
+            }
+        }
+        Ok(())
     }
 
     /// Stop and remove every running instance of the app except `keep`.

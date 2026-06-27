@@ -25,6 +25,17 @@ pub struct RunningContainer {
     pub host_port: u16,
 }
 
+/// Outcome of reconciling an existing container against Docker on startup.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ContainerStatus {
+    /// Already up — nothing to do.
+    Running,
+    /// Existed but was stopped (e.g. after a host reboot); we started it.
+    Started,
+    /// No such container anymore — the DB record is stale.
+    Missing,
+}
+
 impl DockerEngine {
     /// Connect to the local Docker daemon (unix socket / npipe / DOCKER_HOST).
     pub fn connect() -> Result<Self> {
@@ -88,6 +99,7 @@ impl DockerEngine {
         manifest: &Manifest,
         host_port: u16,
         external: bool,
+        data_mount: Option<(String, String)>,
     ) -> Result<RunningContainer> {
         let container_port = manifest.primary_port();
         let port_key = format!("{container_port}/tcp");
@@ -116,13 +128,31 @@ impl DockerEngine {
         log_opts.insert("max-size".to_string(), "10m".to_string());
         log_opts.insert("max-file".to_string(), "3".to_string());
 
+        // Bind-mount a host directory for persistent data, if configured. The
+        // host side is created up front so Docker doesn't auto-create it as root
+        // and the user can read/write the files directly.
+        let binds = match &data_mount {
+            Some((host, container)) => {
+                if let Err(e) = std::fs::create_dir_all(host) {
+                    anyhow::bail!("creating data directory {host}: {e}");
+                }
+                Some(vec![format!("{host}:{container}")])
+            }
+            None => None,
+        };
+
         let host_config = HostConfig {
             port_bindings: Some(bindings),
+            binds,
             memory: parse_memory(manifest.resources.memory.as_deref()),
             nano_cpus: parse_cpus(manifest.resources.cpu.as_deref()),
+            // `unless-stopped` so instances come back automatically after a host
+            // reboot or Docker daemon restart. (`on-failure` does NOT restart
+            // containers that were running at shutdown, which left apps down
+            // after the nightly reboot while the DB still showed them running.)
             restart_policy: Some(bollard::models::RestartPolicy {
-                name: Some(bollard::models::RestartPolicyNameEnum::ON_FAILURE),
-                maximum_retry_count: Some(5),
+                name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                maximum_retry_count: None,
             }),
             log_config: Some(bollard::models::HostConfigLogConfig {
                 typ: Some("json-file".to_string()),
@@ -179,6 +209,33 @@ impl DockerEngine {
             .await
             .context("removing container")?;
         Ok(())
+    }
+
+    /// Reconcile an existing container with Docker: if it exists but is stopped,
+    /// start it; report whether it was already running, just started, or gone.
+    /// Used on startup to bring instances back after a host reboot.
+    pub async fn ensure_running(&self, container_id: &str) -> Result<ContainerStatus> {
+        match self.docker.inspect_container(container_id, None).await {
+            Ok(info) => {
+                let running = info
+                    .state
+                    .and_then(|s| s.running)
+                    .unwrap_or(false);
+                if running {
+                    Ok(ContainerStatus::Running)
+                } else {
+                    self.docker
+                        .start_container(container_id, None::<StartContainerOptions<String>>)
+                        .await
+                        .context("starting existing container")?;
+                    Ok(ContainerStatus::Started)
+                }
+            }
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(ContainerStatus::Missing),
+            Err(e) => Err(e).context("inspecting container"),
+        }
     }
 
     /// Restart a running container in place.

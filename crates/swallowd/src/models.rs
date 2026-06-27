@@ -26,6 +26,12 @@ pub struct App {
     /// a random localhost port is assigned per instance and traffic only flows
     /// through Caddy.
     pub external_port: Option<i64>,
+    /// Absolute host directory bind-mounted into every instance for persistent
+    /// data (databases, uploads…). `None` => no mount.
+    pub data_dir: Option<String>,
+    /// Path the data directory appears at inside the container. Defaults to
+    /// `/data` when empty; only meaningful when `data_dir` is set.
+    pub mount_path: Option<String>,
     pub created_at: String,
 }
 
@@ -33,7 +39,7 @@ impl App {
     pub async fn list(db: &SqlitePool, owner_id: i64) -> sqlx::Result<Vec<App>> {
         sqlx::query_as::<_, App>(
             "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
-             webhook_secret, external_port, created_at \
+             webhook_secret, external_port, data_dir, mount_path, created_at \
              FROM apps WHERE owner_id = ? ORDER BY created_at DESC, id DESC",
         )
         .bind(owner_id)
@@ -41,10 +47,22 @@ impl App {
         .await
     }
 
+    /// Every app across all owners. Used by startup reconciliation, which runs
+    /// before any per-request owner context exists.
+    pub async fn list_all(db: &SqlitePool) -> sqlx::Result<Vec<App>> {
+        sqlx::query_as::<_, App>(
+            "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
+             webhook_secret, external_port, data_dir, mount_path, created_at \
+             FROM apps ORDER BY id",
+        )
+        .fetch_all(db)
+        .await
+    }
+
     pub async fn get(db: &SqlitePool, id: i64) -> sqlx::Result<App> {
         sqlx::query_as::<_, App>(
             "SELECT id, owner_id, name, repo_url, default_branch, domain, manifest, \
-             webhook_secret, external_port, created_at \
+             webhook_secret, external_port, data_dir, mount_path, created_at \
              FROM apps WHERE id = ?",
         )
         .bind(id)
@@ -59,11 +77,14 @@ impl App {
         repo_url: &str,
         default_branch: &str,
         domain: &str,
+        data_dir: Option<&str>,
+        mount_path: Option<&str>,
     ) -> sqlx::Result<App> {
         let secret = random_token(40);
         let id = sqlx::query(
-            "INSERT INTO apps (owner_id, name, repo_url, default_branch, domain, webhook_secret) \
-             VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO apps \
+             (owner_id, name, repo_url, default_branch, domain, webhook_secret, data_dir, mount_path) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(owner_id)
         .bind(name)
@@ -71,6 +92,8 @@ impl App {
         .bind(default_branch)
         .bind(domain)
         .bind(&secret)
+        .bind(data_dir)
+        .bind(mount_path)
         .execute(db)
         .await?
         .last_insert_rowid();
@@ -99,6 +122,35 @@ impl App {
             .execute(db)
             .await?;
         Ok(())
+    }
+
+    /// Set (or clear, with `None`) the persistent data mount for an app. An
+    /// empty `mount_path` falls back to `/data` at run time.
+    pub async fn set_data_mount(
+        db: &SqlitePool,
+        id: i64,
+        data_dir: Option<&str>,
+        mount_path: Option<&str>,
+    ) -> sqlx::Result<()> {
+        sqlx::query("UPDATE apps SET data_dir = ?, mount_path = ? WHERE id = ?")
+            .bind(data_dir)
+            .bind(mount_path)
+            .bind(id)
+            .execute(db)
+            .await?;
+        Ok(())
+    }
+
+    /// Resolved (host, container) bind mount for this app, if configured.
+    pub fn data_mount(&self) -> Option<(String, String)> {
+        let host = self.data_dir.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+        let target = self
+            .mount_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("/data");
+        Some((host.to_string(), target.to_string()))
     }
 }
 

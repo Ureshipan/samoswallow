@@ -177,6 +177,12 @@ async fn dashboard(State(state): State<AppState>) -> ApiResult<Markup> {
                         div { label { "Поддомен" } input type="text" name="domain" placeholder="my-app" required; }
                         div { label { "Git репозиторий (URL)" } input type="text" name="repo_url" placeholder="https://github.com/you/my-app" required; }
                         div { label { "Ветка" } input type="text" name="default_branch" value="main"; }
+                        div { label { "Папка для данных на хосте (опц.)" } input type="text" name="data_dir" placeholder="/srv/my-app/data"; }
+                        div { label { "Путь монтирования в контейнере" } input type="text" name="mount_path" placeholder="/data"; }
+                    }
+                    p class="muted" style="margin-top:8px; margin-bottom:0" {
+                        "Папка с данными монтируется в контейнер при каждом деплое — для баз данных и файлов, "
+                        "которые должны переживать пересборки и перезагрузки. Оставь пусто, чтобы не монтировать."
                     }
                     div style="margin-top:12px" { button class="primary" type="submit" { "Создать" } }
                 }
@@ -192,6 +198,10 @@ struct CreateAppForm {
     #[serde(default)]
     default_branch: String,
     domain: String,
+    #[serde(default)]
+    data_dir: String,
+    #[serde(default)]
+    mount_path: String,
 }
 
 async fn create_app(
@@ -207,6 +217,8 @@ async fn create_app(
     {
         return Err(ApiError::BadRequest("all fields are required".into()));
     }
+    let (data_dir, mount_path) =
+        crate::api::validate_data_mount(Some(&form.data_dir), Some(&form.mount_path))?;
     App::create(
         &state.db,
         state.owner_id,
@@ -214,6 +226,8 @@ async fn create_app(
         form.repo_url.trim(),
         branch,
         form.domain.trim(),
+        data_dir.as_deref(),
+        mount_path.as_deref(),
     )
     .await?;
     Ok(Redirect::to("/"))
@@ -271,6 +285,12 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                             " (прямой доступ снаружи, помимо Caddy)"
                         }
                     }
+                    @if let Some((host, target)) = app.data_mount() {
+                        div class="muted" style="margin-top:4px; font-size:12px" {
+                            "Данные: " code { (host) } " → " code { (target) }
+                            " (монтируется в контейнер)"
+                        }
+                    }
                 }
                 div {
                     form class="inline" method="post" action={ "/apps/" (app.id) "/deploy" } {
@@ -301,13 +321,10 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                 h2 { "Настройки" }
                 form method="post" action={ "/apps/" (app.id) "/settings" } {
                     label for="external_port" { "Внешний порт" }
-                    div class="row" style="justify-content:flex-start; gap:10px" {
-                        input type="text" inputmode="numeric" name="external_port"
-                            id="external_port" placeholder="напр. 8081"
-                            value=(app.external_port.map(|p| p.to_string()).unwrap_or_default())
-                            style="max-width:160px";
-                        button class="primary" type="submit" { "Сохранить" }
-                    }
+                    input type="text" inputmode="numeric" name="external_port"
+                        id="external_port" placeholder="напр. 8081"
+                        value=(app.external_port.map(|p| p.to_string()).unwrap_or_default())
+                        style="max-width:160px";
                     p class="muted" style="margin-top:8px" {
                         "Если задан, инстансы публикуются напрямую на "
                         code { "0.0.0.0:<порт>" }
@@ -315,6 +332,28 @@ async fn app_detail(State(state): State<AppState>, Path(id): Path<i64>) -> ApiRe
                         "При деплое старый инстанс гасится до запуска нового — короткий простой. "
                         "Пусто — случайный порт на " code { "127.0.0.1" } ", только через Caddy."
                     }
+
+                    div class="grid" style="margin-top:14px" {
+                        div {
+                            label for="data_dir" { "Папка для данных на хосте" }
+                            input type="text" name="data_dir" id="data_dir"
+                                placeholder="/srv/my-app/data"
+                                value=(app.data_dir.clone().unwrap_or_default());
+                        }
+                        div {
+                            label for="mount_path" { "Путь монтирования в контейнере" }
+                            input type="text" name="mount_path" id="mount_path"
+                                placeholder="/data"
+                                value=(app.mount_path.clone().unwrap_or_default());
+                        }
+                    }
+                    p class="muted" style="margin-top:8px" {
+                        "Папка с хоста монтируется в контейнер (по умолчанию в " code { "/data" } ") — "
+                        "для постоянных баз данных и файлов, доступных и с хоста напрямую. "
+                        "Применяется при следующем деплое. Пусто — без монтирования."
+                    }
+
+                    div style="margin-top:12px" { button class="primary" type="submit" { "Сохранить" } }
                 }
             }
 
@@ -438,6 +477,10 @@ async fn deploy_app(State(state): State<AppState>, Path(id): Path<i64>) -> Respo
 struct SettingsForm {
     #[serde(default)]
     external_port: String,
+    #[serde(default)]
+    data_dir: String,
+    #[serde(default)]
+    mount_path: String,
 }
 
 async fn update_app_settings(
@@ -455,7 +498,10 @@ async fn update_app_settings(
         ),
     };
     let port = crate::api::validate_external_port(port)?;
+    let (data_dir, mount_path) =
+        crate::api::validate_data_mount(Some(&form.data_dir), Some(&form.mount_path))?;
     App::set_external_port(&state.db, id, port).await?;
+    App::set_data_mount(&state.db, id, data_dir.as_deref(), mount_path.as_deref()).await?;
     Ok(Redirect::to(&format!("/apps/{id}")))
 }
 
