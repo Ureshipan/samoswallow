@@ -56,6 +56,22 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => warn!(error = %e, "could not bootstrap Caddy (is it running?)"),
     }
 
+    // Expose samoswallow's own UI/API by subdomain (no port in the URL). The
+    // upstream port is taken from SWALLOW_LISTEN so it always matches where the
+    // daemon actually bound. When listening on 0.0.0.0 we dial loopback, since
+    // Caddy runs on the same host.
+    let self_host = format!("samoswallow.{}", config.base_domain);
+    let dial_ip = if config.listen_addr.ip().is_unspecified() {
+        "127.0.0.1".to_string()
+    } else {
+        config.listen_addr.ip().to_string()
+    };
+    let self_upstream = format!("{dial_ip}:{}", config.listen_addr.port());
+    match caddy.sync_self_route(&self_host, &self_upstream).await {
+        Ok(()) => info!(host = %self_host, upstream = %self_upstream, "samoswallow reachable via Caddy subdomain"),
+        Err(e) => warn!(error = %e, "could not register samoswallow's own Caddy route"),
+    }
+
     // Bring deployed apps back after a host reboot: restart surviving
     // containers, clean up vanished ones, and re-apply Caddy routes (Caddy comes
     // up with an empty config). Best-effort — the daemon serves regardless.

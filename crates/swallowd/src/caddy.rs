@@ -37,6 +37,9 @@ impl CaddyClient {
         format!("swallow-route-{app_id}")
     }
 
+    /// Caddy `@id` for samoswallow's own control-plane (web UI / API) route.
+    const SELF_ROUTE_ID: &'static str = "swallow-self";
+
     /// Ensure the base HTTP server exists (idempotent). Creates an empty
     /// `srv0` listening on :80 and :443 with an `@id`'d routes array. Safe to
     /// call on startup and before every route upsert.
@@ -102,9 +105,21 @@ impl CaddyClient {
     /// Create or replace the route for an app: `host` -> reverse_proxy to the
     /// given upstream `host:port` dials.
     pub async fn sync_app_route(&self, app_id: i64, host: &str, upstreams: &[String]) -> Result<()> {
-        self.ensure_bootstrap().await?;
+        self.upsert_route(&Self::route_id(app_id), host, upstreams)
+            .await
+    }
 
-        let id = Self::route_id(app_id);
+    /// Route samoswallow's own web UI / API: `host` -> reverse_proxy to the
+    /// daemon itself, so the control plane is reachable by subdomain without a
+    /// port. The `upstream` must point at the address from `SWALLOW_LISTEN`.
+    pub async fn sync_self_route(&self, host: &str, upstream: &str) -> Result<()> {
+        self.upsert_route(Self::SELF_ROUTE_ID, host, &[upstream.to_string()])
+            .await
+    }
+
+    /// Idempotently upsert a host -> reverse_proxy route under the given `@id`.
+    async fn upsert_route(&self, id: &str, host: &str, upstreams: &[String]) -> Result<()> {
+        self.ensure_bootstrap().await?;
 
         // Remove any existing route with this id (ignore 404).
         let _ = self
